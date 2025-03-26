@@ -1,0 +1,640 @@
+---
+title: ' RNAseq Analysis infected - Johannes Schöneich'
+output:
+  html_document: 
+    toc: yes
+    fig_width: 12
+    fig_height: 12
+    fig_caption: yes
+    number_sections: yes
+    toc_depth: 4
+  pdf_document: 
+    toc: yes
+    number_sections: yes
+---
+
+```{r, message = FALSE, warning = FALSE}
+library("dplyr")
+library("DESeq2")
+library("pheatmap")
+library("PoiClaClu")
+library("RColorBrewer")
+library("tidyverse")
+library("vsn")
+library("org.Mm.eg.db")
+library("stringr")
+library("genefilter")
+library("ggplot2")
+library("glmpca")
+library("AnnotationDbi")
+library("apeglm")
+library("ComplexHeatmap")
+library("clusterProfiler")
+library("ggrepel")
+library("corrplot")
+library("edgeR")
+library("gage")
+library("gageData")
+library("ggnewscale")
+library("glue")
+library("ggupset")
+library("stats")
+library("FactoMineR")
+library("factoextra")
+library("pcaExplorer")
+library("viridis")
+library("sva")
+library("gridExtra")
+library("ggforce")
+```
+
+# Differential Gene Expression Analysis
+
+## Creating metadata for the DGE Analysis
+
+DESeq2 needs sample information (metadata) for performing DGE analysis. 
+Let's create the sample information
+
+```{r}
+# set a seed to make the random parts comparable through every analysis
+set.seed(123) 
+# Name of your harddrive
+harddrive <- "H:"
+
+# The analysis name will be the folder where everything will be stored 
+# and the name for the files
+analysis_name <- "RNAseq_crypt_villus"
+
+# load in helper functions to save plots
+source(file.path(harddrive,"helper_functions.R"))
+
+plot_dir <- file.path(harddrive,glue("RNA_seq/{analysis_name}"))
+dir.create(plot_dir)
+
+#bam_path <- file.path(harddrive,"/saves/RNAseq_211005/BAMs")
+#bam_filenames <- list.files(bam_path, pattern = ".*bam$")
+```
+
+```{r}
+meta_whole <- read.table(file.path(harddrive,"Arbeit/",
+                                   "DEanalysis_2-spf d1vs d25/",
+                                   "meta/meta_matrix.txt"),
+                         header = TRUE, row.names = 1)
+
+coldata <-meta_whole[c(1:12,32:43),]
+ 
+colnames(coldata)[c(2,5)] <- c("timepoint","sample_name") # change name of the columns
+# The metadata can be found in a df called coldata!
+head(coldata)
+```
+
+```{r}
+# Read in  countmatrix
+## Load in data
+data_whole <- read.table(file.path(harddrive,"Arbeit/",
+                                   "DEanalysis_2-spf d1vs d25/data/",
+                                   "count_matrix.tsv"), header= TRUE, row.names=1) 
+
+##1:12,32:43 crypts vs villi
+countmatrix <- data_whole[,6:48][,c(1:12,32:43)]
+```
+
+```{r}
+#countmatrix <- as.data.frame(countmatrix)
+
+## Removal of Gender Genes from ENSEMBL ID itself
+countmatrix <- countmatrix[rownames(countmatrix) %ni%
+              c("ENSMUSG00000086503","ENSMUSG00000097571",
+                "ENSMUSG00000086370","ENSMUSG00000031329"),]
+
+nrow(countmatrix)
+#countmatrix <- as.matrix(countmatrix)
+```
+
+```{r}
+#tidying up these names again
+# the elements from sample_name from coldata must the the colnames of countmatrix
+colnames(countmatrix) <- coldata$sample_name
+# Display the column names
+colnames(countmatrix)
+```
+
+## Annotating and Exporting ENSEMBL ID into Gene Symbols
+
+Adding genes annotated from ENSEMBL ID to Gene symbols and ENTREZ Id to countmatrix table. Will be keeping the symbols and entrez columsn to be added later into results table as it is for later use
+
+```{r}
+cm_row <- rownames(countmatrix)
+head(cm_row)
+# Mapping the ENSEMBL ID to Symbol and ENTREZ ID
+symbols <- mapIds(
+  org.Mm.eg.db,
+  keys = cm_row,
+  column = c('SYMBOL'),
+  keytype = 'ENSEMBL',
+  multiVals = "first"
+)
+```
+
+```{r}
+symbols <- symbols[!is.na(symbols)]
+symbols <- symbols[match(rownames(countmatrix), names(symbols))]
+head(symbols, 25)
+
+# Creating a new column called genename and putting in the symbols and entrez columns into count matrix
+countmatrix$genename <- symbols
+
+# Removing all rows with NA values for genenames, so that those rows are filtered out.
+countmatrix <- unique(countmatrix[rowSums(is.na(countmatrix)) == 0, ]) # Apply rowSums & is.na
+nrow(countmatrix)
+# Moving the ENSEMBL ID from rownames into separate column for itself.
+countmatrix <- tibble::rownames_to_column(countmatrix, "E_ID")
+# Removing the duplicated genes so that then these genes can be made into rownames for countmatrix
+countmatrix <- distinct(countmatrix[!duplicated(countmatrix$genename), ])
+```
+
+```{r}
+# Now make the genename column into rownames of count matrix
+rownames(countmatrix) <- countmatrix[,"genename"]
+# Keeping this version of countmatrix for later use
+cm_table <- countmatrix
+# dropping the column E_ID, genenames so that only numeric values are present in it as an input of DESEq Object.
+countmatrix <- subset(countmatrix, select = -c(genename, E_ID))#
+```
+
+# Calculating CPM Values
+
+```{r}
+# as DGEList
+dge_er <- DGEList(counts = countmatrix)
+
+dim(dge_er)
+colnames(dge_er)
+#dge_er$samples
+
+## calculate norm. factors
+nr <- calcNormFactors(dge_er)
+
+## get normalized counts
+cpmvalues <- cpm(nr)
+cpmvalues_d <- cpm.default(nr)
+cpmvalues_u<-cpm(nr)
+```
+
+# Construct DESeqDataSet using DESeq2
+
+Now, construct DESeqDataSet for DGE analysis.
+
+But before that, a sanity check : It is essential to have the name of the columns in the count matrix in the same order as that in name of the samples (rownames in coldata).
+
+```{r}
+all(rownames(coldata) %in% colnames(countmatrix))
+ncol(countmatrix) == nrow(coldata)
+dim(countmatrix)
+```
+
+## Creating the DESeq Data set Object
+
+```{r}
+# Changing countmatrix into Matrix of numeric values so that only numeric values are present in it as an input of DESEq Object.
+countmatrix <- as.matrix(countmatrix)
+class(countmatrix) <- "numeric"
+
+#the batch effect are the experimenters
+batches <- as.numeric(as.factor(coldata$experimenter))
+
+#we have 4 different groups. 
+groups <- as.numeric(as.factor(coldata$timepoint))
+
+#use factor, otherwise DEseq2 will ask for it
+coldata_batch <- cbind(coldata,batches = as.factor(batches))
+
+#no shrinkage as the authors say its fine without
+corrected_data <- ComBat_seq(counts = countmatrix, batch = batches, group = groups)
+
+#impute zeros, add +1 to everything
+corrected_data <- corrected_data + 1
+
+dds <- DESeqDataSetFromMatrix(countData = corrected_data,
+                                         colData = coldata_batch, 
+                                         design = ~ area + timepoint)
+
+nrow(dds)
+```
+
+## Exploratory Data Analysis and Visualization
+
+### Pre-filtering the dataset
+
+Our count matrix with our DESeqDataSet contains many rows with only zeros, and additionally many rows with only a few fragments total. In order to reduce the size of the object, and to increase the speed of our functions, we can remove the rows that have no or nearly no information about the amount of gene expression.
+
+Applying the most minimal filtering rule: removing rows of the DESeqDataSet that have no counts, or only a single count across all samples. Additional weighting/filtering to improve power is applied at a later step in the workflow.
+
+```{r}
+keep <- rowSums(counts(dds)) >= 60
+dds <- dds[keep,]
+paste0("filtering step",nrow(dds))
+```
+
+### The variance stabilizing transformation
+
+## Applying VST transformation
+
+```{r}
+vsd <- vst(dds, blind = FALSE)
+head(assay(vsd), 3)
+colData(vsd)
+vsd_coldata <- colData(vsd)
+```
+
+```{r}
+dds <- estimateSizeFactors(dds)
+dds
+```
+
+## Sample Distances
+
+useful first step in an RNA-seq analysis is often to assess overall similarity between samples:
+
+1.  Which samples are similar to each other, which are different?
+2.  Does this fit to the expectation from the experiment's design?
+
+### Euclidean Distance between samples
+
+dist to calculate the Euclidean distance between samples - useful for ONLY normalized data. To ensure we have a roughly equal contribution from all genes, we use it on the VST data.
+
+```{r}
+sampleDists <- dist(t(assay(vsd)))
+sampleDistMatrix <- as.matrix( sampleDists )
+rownames(sampleDistMatrix) <- vsd$sample_name
+colnames(sampleDistMatrix) <- vsd$sample_name
+
+colors <- colorRampPalette( rev(brewer.pal(9, "RdYlBu")) )(255)
+(EuclideanDistanceHeatmap <- pheatmap(sampleDistMatrix,
+         clustering_distance_rows = sampleDists,
+         clustering_distance_cols = sampleDists,
+         main = "Sample-to-Sample Euclidean Distance",
+         col = colors))
+```
+
+### Poisson Distance between Samples
+
+```{r, fig.height=10,fig.width=10}
+poisd <- PoissonDistance(t(counts(dds))) # raw counts or unnormalized data
+samplePoisDistMatrix <- as.matrix( poisd$dd )
+rownames(samplePoisDistMatrix) <- dds$sample_name
+colnames(samplePoisDistMatrix) <- dds$sample_name
+
+colors <- colorRampPalette( rev(brewer.pal(9, "RdYlBu")) )(255)
+(poisson_dist_plot <- pheatmap(samplePoisDistMatrix,
+         clustering_distance_rows = poisd$dd,
+         clustering_distance_cols = poisd$dd,
+         main = "Sample-to-Sample Poisson Distance",
+         col = colors,fontsize=20))
+
+```
+
+# PCA Plot
+
+## Calculating all PCA Values
+
+```{r}
+# calculate the variance for each gene
+rv <- rowVars(assay(vsd))
+ntop <- 500
+# select the ntop genes by variance
+select <- order(rv, decreasing = TRUE)[seq_len(min(ntop, length(rv)))]
+
+# perform a PCA on the data in assay(x) for the selected genes
+pca <- prcomp(t(assay(vsd)[select,]))
+summary(pca)
+# the contribution to the total variance for each component
+#percentVar <- (pca$sdev^2 / sum( pca$sdev^2 )) * 100
+#percentVar
+```
+
+## PCA Plot with VST Data
+
+### Function for calculating percentvar
+
+```{r}
+percentvar_calculation <- function(pcaData_variable){
+  # function to calculate percentvar for different variables
+  percentvar_variable <- round(100 * attr(pcaData_variable, "percentVar"), digits = 2 )
+  return(percentvar_variable)
+}
+
+
+plotPCA_34 <- function (object, intgroup = "condition", ntop = 500, 
+        returnData = FALSE) {
+        rv <- rowVars(assay(object))
+        select <- order(rv, decreasing = TRUE)[seq_len(min(ntop, 
+            length(rv)))]
+        pca <- prcomp(t(assay(object)[select, ]))
+        percentVar <- pca$sdev^2/sum(pca$sdev^2)
+        if (!all(intgroup %in% names(colData(object)))) {
+            stop("the argument 'intgroup' should specify columns of colData(dds)")
+        }
+        intgroup.df <- as.data.frame(colData(object)[, intgroup, 
+            drop = FALSE])
+        group <- if (length(intgroup) > 1) {
+            factor(apply(intgroup.df, 1, paste, collapse = ":"))
+        }
+        else {
+            colData(object)[[intgroup]]
+        }
+        d <- data.frame(PC3 = pca$x[, 3], PC4 = pca$x[, 4], group = group, 
+            intgroup.df, name = colnames(object))
+        if (returnData) {
+            attr(d, "percentVar") <- percentVar[3:4]
+            return(d)
+        }
+        ggplot(data = d, aes_string(x = "PC3", y = "PC4", color = "group")) + 
+            geom_point(size = 3) + xlab(paste0("PC3: ", round(percentVar[3] * 
+            100), "% variance")) + ylab(paste0("PC4: ", round(percentVar[4] * 
+            100), "% variance")) + coord_fixed()
+}
+```
+
+```{r}
+pcaData <- plotPCA(vsd, intgroup = c("timepoint","area","sample_name"), 
+                              returnData = TRUE)
+#pcaData <- pcaData[c(1:3,10:12,4:9),]
+percentVar <- percentvar_calculation(pcaData)
+
+pcaData_pc34 <- plotPCA_34(vsd, intgroup = c("timepoint","area","sample_name"), 
+                              returnData = TRUE)
+percentVar_pc34 <- percentvar_calculation(pcaData_pc34)
+```
+
+### Functions for Plot aethetics and saving PCA Plots
+
+```{r}
+color_values <- c("#E08B00","#5BB300","#7997FF","#FF61C9")
+# the basic set of common aesthetic settings for PCA plots, 
+pca.theme <- list(theme_bw() ,
+                     #geom_hline(yintercept = 0, color = "gray", linewidth = 1) ,
+                     #geom_vline(xintercept = 0, color = "gray", linewidth = 1) , 
+                     geom_point(size = 5),
+                    #  coord_fixed() ,
+                     #scale_y_continuous(sec.axis = sec_axis(~. *1)) ,
+                    # scale_x_continuous(sec.axis = sec_axis(~. *1)) ,
+                      theme_classic() ,
+                      theme(text = element_text(size = 5),
+                            axis.text = element_text(size = 5),
+                            legend.position = c(0.93,0.82),
+                            aspect.ratio = 1)
+  )
+
+pcaData$condition <- c(rep("pre weaning crypts",9),rep("post weaning crypts",3),
+                       rep("pre weaning villi",9),rep("post weaning villi",3))
+```
+
+```{r fig.height=8, fig.width=8}
+fill_colors <- c(
+  "pre weaning crypts"  = "#B3D7FF",  # Light Blue
+  "pre weaning villi"   = "#1F5D99",  # Dark Blue
+  "post weaning crypts" = "#FFB3B0",  # Light Red
+  "post weaning villi"  = "#C2403C"   # Dark Red
+)
+
+(PCAplot <- ggplot(pcaData, aes(x = PC1, y = PC2, 
+                                color = timepoint,
+                                shape = area)) +
+  xlab(glue("PC1 ({percentVar[1]}%)")) +
+  ylab(glue("PC2 ({percentVar[2]}%)")) +
+  ggtitle(element_blank()) +
+  scale_colour_manual(values = color_values) +
+  # Add horizontal and vertical lines
+  geom_hline(yintercept = 0, color = "gray", linewidth = 0.5) +
+  geom_vline(xintercept = 0, color = "gray", linewidth = 0.5) +
+  # Add ellipses
+  geom_mark_ellipse(aes(group = condition,
+                        fill = condition, 
+                        label = NULL),
+                    alpha = 0.2, 
+                    color = NA, 
+                    show.legend = FALSE,
+                    expand = unit(0.2, "cm")) +  # Adjust expansion of the ellipse
+    scale_fill_manual(values = fill_colors) +
+    scale_y_continuous(
+      limits = c(min(pcaData$PC2) -1 , max(pcaData$PC2) + 5 ),  # Set y-axis limits
+      #sec.axis = dup_axis(name = NULL)  # Mirror the primary y-axis without title
+      ) +
+    scale_x_continuous(
+      limits = c(min(pcaData$PC1) - 5, max(pcaData$PC1) + 1),
+      #sec.axis = dup_axis(name = NULL)  # Mirror the primary x-axis without title
+      ) +
+    pca.theme)
+```
+
+
+```{r fig.height=8, fig.width=8}
+(pca_34 = ggplot(pcaData_pc34,
+                      aes(x = PC3,
+                          y = PC4,
+                          color = timepoint,
+                          label = sample_name,
+                          shape = area)) +
+        xlab(paste0("PC3: ", percentVar_pc34[1], "% variance")) +
+        ylab(paste0("PC4: ", percentVar_pc34[2], "% variance")) +
+        ggtitle("PCA PC3/4") +
+        scale_colour_manual(values = color_values) +
+        pca.theme + theme(legend.position = c(0.126,0.7575))
+  )
+```
+
+```{r fig.height=8, fig.width=8}
+save_ggplot_formats(PCAplot, plot_dir,"PCA_timepoints_circles", 
+                    width = 10,
+                    height = 10,
+                    units = "cm")
+```
+
+
+```{r fig.height=8, fig.width=8}
+save_ggplot_formats(pca_34, plot_dir,"PCA_pc_3_4_timepoints",width = 8,height = 8)
+```
+
+```{r}
+# Visualize eigenvalues/variances
+fviz_screeplot(pca, addlabels = TRUE)
+```
+
+```{r}
+eig.val <- get_eigenvalue(pca)
+eig.val
+
+var <- get_pca_var(pca)
+
+contrib_df <- as.data.frame(var$contrib) %>% arrange(desc(Dim.1))
+```
+
+## Genes + PCA Biplots
+
+```{r fig.height=10, fig.width=10}
+biplot <- fviz_pca_biplot(pca, 
+                repel = TRUE,
+                select.var = list(contrib = 50),
+                labelsize = 2) +
+  theme(axis.title = element_text(size = 5),
+                          axis.text = element_text(size = 5),
+                          legend.position = "none", text = element_text(size = 5)
+                          ) +
+  ggtitle(element_blank())
+
+
+ save_ggplot_formats(
+   plt = biplot,
+   create_plot_subdir = F,
+   base_plot_dir = plot_dir,
+   plt_name = glue("pca_biplot_crypt_villus"),
+   width = 3,height = 3
+   )
+```
+
+```{r fig.height=10, fig.width=10}
+fviz_pca_var(pca, 
+             col.var = "contrib",
+             repel = TRUE,
+             select.var = list(contrib = 100),
+             labelsize = 4,
+             max.overlaps = Inf) + 
+  theme(axis.title = element_text(size = 5),
+        axis.text = element_text(size = 5),
+        legend.position = "none", 
+        text = element_text(size = 5)
+        ) +
+  ggtitle(element_blank())
+```
+
+
+```{r fig.height=10, fig.width=10}
+heat.colors <- viridis(6)
+fviz_pca_var(pca, 
+             col.var = "contrib", 
+             repel = TRUE,
+             select.var = list(contrib = 100),
+             gradient.cols = heat.colors,
+             labelsize = 4,
+             max.overlaps = Inf) + 
+  theme(axis.title = element_text(size = 16),
+        axis.text = element_text(size = 14),
+        legend.position = "none", text = element_text(size=25)
+        ) +
+  ggtitle(element_blank())
+```
+
+```{r}
+# Contributions of variables to PC1
+fviz_contrib(pca, choice = "var", axes = 1, top = 25)
+```
+
+```{r}
+# Contributions of variables to PC2
+fviz_contrib(pca, choice = "var", axes = 2, top = 25)
+```
+
+## Hierarchical Clustering
+
+### applying rlog Transformation
+
+```{r}
+rld <- rlog(dds, blind = FALSE)
+head(assay(rld), 3)
+```
+
+```{r}
+### Extract the rlog matrix from the object
+rld_mat <- assay(rld) #assay() is function from the "SummarizedExperiment" package that was loaded when you loaded DESeq2
+```
+
+```{r}
+### Compute pairwise correlation values
+rld_cor <- cor(rld_mat)    ## cor() is a base R function
+head(rld_cor)   ## check the output of cor(), make note of the rownames and colnames
+```
+
+```{r}
+### Plot heatmap
+heat.colors <- brewer.pal(6, "RdYlBu")
+(Hclust_plot <- pheatmap(rld_cor, 
+                        color = heat.colors,
+                        main = "Hierarchical Clustering of Samples - 
+                        Correlation Matrix (log tf)"
+                       ))
+```
+
+## DGE Results
+
+### Preparing for the differential expression pipeline
+```{r}
+#we have different experiments to study.
+dds_group <- dds
+dds_group$group <- factor(paste0(dds_group$timepoint,"_",dds_group$area))
+design(dds_group) <- ~ group
+
+dds_early_late <- dds
+dds_early_late$stage <- factor(c(rep("early",9),rep("late",3),
+                                rep("early",9),rep("late",3)))
+
+dds_early_late$stage_area <- factor(paste0(dds_early_late$stage, dds_early_late$area))
+design(dds_early_late) <- ~ stage_area
+```
+
+```{r}
+dds1 <- DESeq(dds, test = "LRT",reduced = ~ timepoint)
+
+dds_group_deseq <- DESeq(dds_group, test = "LRT",reduced = ~ 1)
+dds_early_late_deseq <- DESeq(dds_early_late, test = "LRT",reduced = ~ 1)
+
+# The Wald test is used by default for comparing 2 groups of samples in a DE analysis. 
+
+# The LRT is the preferred method for comparing 3 or more groups of samples. 
+# For example, say you have 3 groups of samples and you want to see if genes change
+# in expression between any of the  groups. When you use the likelihood ratio test,
+# you are doing just one comparison, so it's statistically a more powerful analysis, 
+# because you have less of an issue with multiple hypothesis testing. 
+
+# If you instead do the Wald test on 3 groups of samples, 
+# you would need to do 3 separate tests,
+# comparing each group against the other 2. 
+# That’s 3 separate analyses, which can create multiple hypothesis issues.
+# In order to avoid these issues, it is advisable to do a likelihood ratio test
+# in experimental setups where you have 3 or more groups of samples.
+
+# The LRT is therefore useful for testing multiple terms at once, for example testing 3  
+# or more levels of a factor at once, or all interactions between two variables. The LRT
+# for count data is conceptually similar to an analysis of variance (ANOVA) calculation 
+# in linear regression, except that in the case of the Negative Binomial GLM, we use an 
+# analysis of deviance (ANODEV), where the deviance captures the difference in likelihood
+# between a full and a reduced model.
+```
+
+# Save Data
+```{r Saves}
+write.csv(counts(dds1, normalized = TRUE),
+          file = file.path(plot_dir,
+                           glue("countmatrix_normalized_batchcorr_LRT_{analysis_name}.csv")))
+
+write.csv(counts(dds1, normalized = FALSE),
+          file = file.path(plot_dir,
+                           glue("countmatrix_raw_batchcorr_LRT_{analysis_name}.csv")))
+
+
+write.xlsx(contrib_df,file.path(plot_dir,
+                              glue("pca_driver_genes_{analysis_name}.xlsx")),
+                                   rowNames= TRUE)
+
+saveRDS(dds1,file.path(plot_dir,
+                       glue("dds_LRT_{analysis_name}.Rds")))
+
+saveRDS(dds_group_deseq,file.path(plot_dir,
+                       glue("dds_LRT_group_{analysis_name}.Rds")))
+
+saveRDS(dds_early_late_deseq,file.path(plot_dir,
+                       glue("dds_LRT_early_late_{analysis_name}.Rds")))
+
+save.image(file = file.path(plot_dir,
+                            glue("workspace_combatseq_LRT_{analysis_name}.Rdata")))
+```
