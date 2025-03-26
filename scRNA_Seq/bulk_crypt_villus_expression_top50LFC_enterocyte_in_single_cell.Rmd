@@ -1,0 +1,427 @@
+---
+title: "top 50 L2FC, uninfected, min quantile 0.05, max quantile 0.95"
+output:
+  html_document:
+    df_print: paged
+---
+```{r setup, include=FALSE} 
+knitr::opts_chunk$set(warning = FALSE, message = FALSE) 
+```
+
+```{r}
+library(Seurat)
+library(openxlsx)
+library(tidyverse)
+library(DESeq2)
+library(AnnotationDbi)
+library(org.Mm.eg.db)
+library(scales)
+library(cowplot)
+library(gridExtra)
+library(patchwork)
+```
+
+```{r}
+# Crypt villus an promedi in single cell
+# The idea is how do we define crypt-villus and promedi
+# first of all we are going to overlap bulk days. We compare always vs the extremes.
+# d1/5/10 vs 25 and 25 vs 1.
+
+harddrive <- "H:"
+
+source(file.path(harddrive,"helper_functions.R"))
+source(file.path(harddrive,"aggregate_expression_functions.R"))
+source(file.path(harddrive,"scrna_datasets/save_load_helper.R"))
+source(file.path(harddrive,"scrna_datasets/single_cell_themes.R"))
+
+cluster_use <- "seurat_clusters"
+
+l2fc.cutoff <- 1
+p.cutoff <- 0.05
+
+analysis_folder <- file.path(harddrive,
+                          "scrna_datasets/scrna_both_d25/scrna_full_2024_both_d25_ent_v2")
+
+plots_folder <- file.path(harddrive,"plots/")
+
+analysis_name <- "crypt_villus_eec"
+
+inf_cols <- c("#E08B00","#5BB300","#00C0AF","#7997FF","#FF61C9")
+uninf_cols  <- c("#E08B00","#5BB300","#7997FF","#FF61C9")
+```
+
+```{r}
+scrna <- load_object(
+  file.path(analysis_folder,"scrna_inf_both_d25_ent.Rds"))
+
+Idents(scrna) <- cluster_use
+DefaultAssay(scrna) <- "MAGIC_RNA"
+```
+
+```{r}
+goblet_folder <- file.path(harddrive,
+                           "scrna_datasets/scrna_both_d25",
+                           "scrna_full_2024_both_d25_gob_pan_three",
+                           "scrna_full_2024_both_d25_gob_pan_three_inf/save")
+
+scrna_gob <- load_object(file.path(goblet_folder,
+                                      "scrna_inf_both_d25_gob.Rds"))
+
+Idents(scrna_gob) <- "stage"
+scrna_gob_uninf <- subset(scrna_gob,idents ="d05i", invert = TRUE)
+
+scrna_gob_uninf$stage <- droplevels(as.factor(scrna_gob_uninf$stage))
+
+#cluster 6 is meaningless in the uninfected. Only one cell.
+scrna_gob_uninf_no_c6 <- scrna_gob_uninf[,
+                      !scrna_gob_uninf@meta.data$integrated_snn_res.0.7 == "6"]
+
+scrna_gob_uninf_no_c6$integrated_snn_res.0.7 <- droplevels(
+  scrna_gob_uninf_no_c6$integrated_snn_res.0.7)
+Idents(scrna_gob_uninf_no_c6) <- "integrated_snn_res.0.7"
+scrna_gob_uninf_no_c6 <- RenameIdents(scrna_gob_uninf_no_c6,
+             "7" = "6") 
+
+scrna <- scrna_gob_uninf_no_c6
+```
+
+```{r}
+eec_folder <- file.path(harddrive,
+                        "scrna_datasets/scrna_both_d25",
+                        "scrna_full_2024_both_d25_eec/")
+
+scrna_eec <- load_object(file.path(eec_folder,"scrna_eec_both_d25.Rds"))
+Idents(scrna_eec) <- "RNA_snn_res.0.6" #harmony clustering
+scrna_eec <- RenameIdents(scrna_eec,
+                                '2' = '1',
+                                '3' = '2',
+                                '4' = '3',
+                                '5' = '4',
+                                '6' = '5',
+                                '7' = '6'
+)
+scrna_eec$RNA_snn_res.0.6 <- droplevels(scrna_eec$RNA_snn_res.0.6)
+levels(scrna_eec$RNA_snn_res.0.6) <- 0:6
+scrna_eec_uninf <- scrna_eec[, !scrna_eec@meta.data$name == "d05i"]
+
+scrna_eec_uninf$name <- droplevels(as.factor(scrna_eec_uninf$name))
+
+Idents(scrna_eec_uninf) <- "RNA_snn_res.0.6" #harmony clustering
+
+scrna <- scrna_eec_uninf
+```
+
+```{r}
+de_path <- file.path(harddrive,"DE_analysis")
+
+results.list.bulk <- readRDS(file.path(de_path,
+ "DE_LRT_uninfected/DE_results.list_timepoint.Rds"))
+
+results.list.bulk.prepo <- readRDS(file.path(de_path,
+                             "DE_LRT_uninfected_pre-weaning_post-weaning/",
+                             "DE_results.list_pre-weaning_post-weaning_edit.Rds"))
+
+names(results.list.bulk.prepo) <- make.names(names(results.list.bulk.prepo))
+
+results.list.villi.age <- readRDS(file.path(de_path,                                            "DE_LRT_crypt_villus_group/DE_results.list_group.Rds"))
+
+results.list.cv.prepo <- readRDS(file.path(de_path,
+ "DE_LRT_crypt_villus_pre.weaning_post.weaning/DE_results.list_stage_area_edit.Rds"))
+
+names(results.list.cv.prepo) <- make.names(names(results.list.cv.prepo))
+
+```
+
+```{r}
+results.list.bulk.filter <- lapply(results.list.bulk,function(df){
+  sigsdf <- as.data.frame(df[abs(df$log2FoldChange) >= l2fc.cutoff & 
+                               (df$padj <= p.cutoff),])
+  return(sigsdf)
+})
+
+results.list.crypt.age.filter <- lapply(results.list.villi.age,function(df){
+  sigsdf <- as.data.frame(df[abs(df$log2FoldChange) >= l2fc.cutoff & 
+                               (df$padj <= p.cutoff),])
+  return(sigsdf)
+})
+
+results.list.cv.prepo.filter <- lapply(results.list.cv.prepo,function(df){
+  sigsdf <- as.data.frame(df[abs(df$log2FoldChange) >= l2fc.cutoff & 
+                               (df$padj <= p.cutoff),])
+  return(sigsdf)
+})
+```
+
+```{r}
+# Function to select top symbols (with overlap)
+selectTopSymbols <- function(results, scrna, l2fc.cutoff, direction, top_x){
+  
+  filter_condition <- switch(direction,
+                             "up"   = results$log2FoldChange >= l2fc.cutoff,
+                             "down" = results$log2FoldChange <= -l2fc.cutoff,
+                             stop("Invalid direction")
+                             )
+  #we need a check if its up or down because then the arrange 
+  # switches to either log2fc (down) or -log2fc (up)
+  if(direction == "down"){
+    selected <- results %>%
+    filter(filter_condition & padj <= p.cutoff) %>%
+    arrange(log2FoldChange) %>%
+    filter(symbol %in% rownames(scrna))
+  }
+  
+  if(direction == "up"){
+    selected <- results %>%
+    filter(filter_condition & padj <= p.cutoff) %>%
+    arrange(-log2FoldChange) %>%
+    filter(symbol %in% rownames(scrna))
+  }
+  
+  sums <- rowSums(scrna@assays$MAGIC_RNA@data[selected$symbol,])
+  selected <- selected[which(sums != 0),] %>%
+    slice_head(n = top_x) %>%
+    pull(symbol)
+  
+  return(selected)
+}
+```
+
+```{r}
+DimPlot(scrna,reduction = "INTE_UMAP", group.by = cluster_use) + mini_umap_theme
+DimPlot(scrna,reduction = "INTE_UMAP", group.by = "stage") + mini_umap_theme
+```
+
+```{r, fig.width = 20, fig.height = 5}
+DimPlot(scrna,reduction = "INTE_UMAP", split.by = "stage", 
+        group.by = cluster_use) & mini_umap_theme & ggtitle(element_blank())
+
+DimPlot(scrna,reduction = "INTE_UMAP", split.by = cluster_use, 
+        group.by = cluster_use) & mini_umap_theme & ggtitle(element_blank())
+```
+
+# crypt-villus pre-post weaning
+```{r}
+# Select top symbols without overlap for each dataset
+preWe.crypts_filter <- selectTopSymbols(
+  results.list.cv.prepo.filter$pre.weaning.crypts_pre.weaning.villi, 
+                                        scrna, l2fc.cutoff, direction = "down", 50)
+
+poWe.crypts_filter <- selectTopSymbols(
+  results.list.cv.prepo.filter$post.weaning.crypts_post.weaning.villi, 
+                                       scrna, l2fc.cutoff, direction = "down", 50)
+
+preWe.villi_filter <- selectTopSymbols(
+  results.list.cv.prepo.filter$pre.weaning.crypts_pre.weaning.villi, 
+                                       scrna, l2fc.cutoff, direction = "up", 50)
+
+poWe.villi_filter <- selectTopSymbols(
+  results.list.cv.prepo.filter$post.weaning.crypts_post.weaning.villi, 
+                                       scrna, l2fc.cutoff, direction = "up", 50)
+
+# Check for initial overlap
+initial_overlap <- intersect(preWe.crypts_filter, poWe.villi_filter)
+initial_overlap2 <- intersect(preWe.villi_filter, poWe.crypts_filter)
+
+# Remove overlapping symbols from both datasets
+preWe.crypts_filter <- setdiff(preWe.crypts_filter, initial_overlap)
+poWe.villi_filter <- setdiff(poWe.villi_filter, initial_overlap)
+
+# Remove overlapping symbols from both datasets
+preWe.villi_filter <- setdiff(preWe.villi_filter, initial_overlap2)
+poWe.crypts_filter <- setdiff(poWe.crypts_filter, initial_overlap2)
+```
+
+```{r}
+cv.list <- list(preWe.crypts_filter,poWe.crypts_filter,
+                preWe.villi_filter,poWe.villi_filter)
+names(cv.list) <- c("preWe.crypts","poWe.crypts","preWe.villi","poWe.villi")
+
+new.list <- lapply(cv.list,function(Symbol){
+  Description <- mapIds(
+    org.Mm.eg.db,
+    keys = Symbol,
+    column = "GENENAME",
+    keytype = "SYMBOL",
+    multiVals = "first"
+    )
+  df <- data.frame(Symbol,Description)
+return(df)
+})
+
+#write.xlsx(new.list,file=file.path(harddrive,paste0(analysis_name,"_genes.xlsx"),
+#           rownames = FALSE)
+```
+
+```{r}
+for(i in seq_along(cv.list)){
+  day <- paste0("aggr.exp_cv_",names(cv.list)[i])
+  scrna <- get_aggregate_expression(object = scrna, cv.list[[i]], meta_name = day)
+}
+```
+
+```{r}
+# All plots separate
+plot_list <- list()
+
+all_days <- paste0("aggr.exp_cv_", names(cv.list))
+
+crypts <- all_days[grep("crypts",all_days)]
+villi <- all_days[grep("villi",all_days)]
+preWe <- all_days[grep("preWe",all_days)]
+```
+
+```{r}
+p_crypts <- FeaturePlot(scrna, 
+            features = crypts, 
+            reduction = "INTE_UMAP",
+            min.cutoff = "q05",
+            max.cutoff = "q95", 
+            label = FALSE,
+            order = TRUE,
+            col = c("lightgrey", "#F8766D"),
+            ncol = 2,
+            slot = "scale.data",
+            keep.scale="all",
+            combine = TRUE
+            ) & mini_umap_theme & ggtitle(element_blank())
+
+p_villi <- FeaturePlot(scrna, 
+            features = villi, 
+            reduction = "INTE_UMAP",
+            min.cutoff = "q05",
+            max.cutoff = "q95", 
+            label = FALSE,
+            order = TRUE,
+            col = c("lightgrey", "#F8766D"),
+            ncol = 2,
+            slot = "scale.data",
+            keep.scale="all",
+            combine = TRUE
+            ) & mini_umap_theme & ggtitle(element_blank())
+```
+
+```{r}
+prWe_both_combined <- FeaturePlot(scrna, 
+            features = preWe, 
+            reduction = "harmony_UMAP",
+            min.cutoff = "q05",
+            max.cutoff = "q95", 
+            label = FALSE,
+            order = TRUE,
+            col = c("lightgrey", "red"),
+            ncol = 2,
+            slot = "scale.data",
+            keep.scale="all",
+            combine = TRUE
+            )
+
+# Step 2: Split the combined plot into two separate plots
+prWe_pro_combined <- prWe_both_combined[[1]]
+prWe_dis_combined <- prWe_both_combined[[2]]
+
+# Extract the legend from the combined plot
+legend <- get_legend(prWe_both_combined)
+
+# Remove legend from both plots
+prWe_pro_combined <- prWe_pro_combined + theme(legend.position = "none") + ggtitle("crypts")
+prWe_dis_combined <- prWe_dis_combined + theme(legend.position = "none") + ggtitle("villi")
+
+# Combined plot without the legend
+combined_plot <- (prWe_pro_combined + prWe_dis_combined) + plot_layout(ncol = 2)
+
+# Create a text annotation as a plot element
+left_annotation <- wrap_elements(
+  grid::textGrob(
+    "pre weaning", 
+    rot = 90,  # Rotate text 90 degrees for vertical placement
+    gp = grid::gpar(fontsize = 7, fontface = "bold")
+  )
+)
+
+# Combine the text annotation with the plot layout and legend
+final_plot <- left_annotation + combined_plot + legend + 
+  plot_layout(ncol = 3, widths = c(0.1, 2.5, 1))  & mini_umap_theme
+```
+
+```{r}
+
+plots_folder <- "H:/test"
+save_ggplot_formats(
+            plt = final_plot ,
+            base_plot_dir = plots_folder,
+            plt_name = paste0(analysis_name,"_prWe",cluster_use),
+            width = 7, height = 2.5
+            )
+```
+
+```{r}
+cv_grid <- p_crypts / p_villi
+
+save_ggplot_formats(
+            plt = cv_grid ,
+            base_plot_dir = plots_folder,
+            plt_name = paste0(analysis_name,"_fourplot_independent_scale_",cluster_use),
+            width = 7, height = 5
+            )
+```
+
+```{r}
+p_vln_crypts <- VlnPlot(scrna,
+        features = crypts,
+        pt.size = 0,
+        group.by = cluster_use,
+        same.y.lims = TRUE,
+        combine = TRUE,
+        ncol = 2,
+        sort = FALSE) &
+  theme(axis.title.x = element_blank()) & ggtitle(element_blank())
+
+p_vln_villi <- VlnPlot(scrna,
+        features = villi,
+        pt.size = 0,
+        group.by = cluster_use,
+        same.y.lims = TRUE,
+        combine = TRUE,
+        ncol = 2,
+        sort = FALSE,y.max = 0.00075) &
+    theme(axis.title.x = element_blank()) & ggtitle(element_blank())
+# 1: Removed 1 rows containing non-finite values (`stat_ydensity()`). 
+# 2: Removed 133 rows containing non-finite values (`stat_ydensity()`). 
+```
+
+```{r}
+vln_grid <-  p_vln_crypts / p_vln_villi
+
+save_ggplot_formats(
+  plt = vln_grid,
+  base_plot_dir = plots_folder,
+  plt_name = paste0(analysis_name,"_fourplot_vln_independent_scale_",cluster_use),
+  width = 7, height = 5
+)
+```
+
+```{r}
+#given the data we can suggest that 7+8 are crypts and 2+4+9 villi
+
+scrna$crypt_villus <- scrna$integrated_snn_res.0.8
+
+Idents(scrna) <- "crypt_villus"
+current_idents <- levels(scrna$crypt_villus)
+
+# Step 2: Rename specific clusters
+new_idents <- current_idents
+new_idents[new_idents %in% c("7", "8")] <- "Crypts"
+new_idents[new_idents %in% c("2", "4", "9")] <- "Villi"
+new_idents[new_idents %ni% c("Crypts","Villi")] <- "Intermediate"
+
+# Step 3: Update the Seurat object with new identities
+scrna <- SetIdent(scrna, value = new_idents)
+levels(scrna$crypt_villus) <- new_idents
+
+
+```
+
+```{r}
+
+```
+

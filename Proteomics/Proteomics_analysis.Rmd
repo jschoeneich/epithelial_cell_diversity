@@ -1,0 +1,542 @@
+---
+title: "Proteomics Analysis"
+author: "Johannes Schöneich"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r libraries}
+library(tidyverse)
+library(vsn)
+library(limma)
+library(openxlsx)
+library(glue)
+library(EnhancedVolcano)
+library(reshape2)
+library(circlize)
+library(scales)
+library(patchwork)
+library(cowplot)
+
+harddrive <- "H:"
+
+source(file.path(harddrive,"helper_functions/helper_functions.R"))
+source(file.path(harddrive,"helper_functions/DE_helperfunctions.R"))
+set.seed(1234)
+```
+
+```{r general}
+setwd(file.path(harddrive,"Proteomics/"))
+
+plots_folder <- file.path(harddrive,
+                          "DE_analysis/DE_Proteomics/plots")
+charts_folder <- file.path(harddrive,
+                           "DE_analysis/DE_Proteomics/charts")
+
+dir.create(plots_folder)
+dir.create(charts_folder)
+
+sample_mapping <- read.csv2('coldata_proteomics.csv',
+                            row.names = 1)
+
+comparisons <- as.data.frame(t(combn(c("d01","d05","d10","d25"),2)))
+
+prot_df <-  read.xlsx(file.path(harddrive,
+                                    "Proteomics/Mouse IEC´s_filtered_2.xlsx"),
+                       sheet = 8, colNames = TRUE,rowNames = TRUE,startRow = 2)
+
+condition <- "proteomics"
+
+rownames(prot_df)[grep("^44[0-9].*",rownames(prot_df))] <- 
+  paste0("Gm",rownames(prot_df)[grep("^44[0-9].*",rownames(prot_df))])
+```
+
+```{r transformations if needed, echo=FALSE, eval=FALSE}
+rn <- rownames(prot_df)
+rn <- gsub(";.*","",rn)
+
+prot_df_unique <- prot_df[-grep(";",rn),]
+```
+
+# PCA and biplot
+```{r}
+rot_df.num <- sapply(prot_df,as.numeric)
+
+rv <- rowVars(prot_df.num)
+ntop <- 500
+# select the ntop genes by variance
+select <- order(rv, decreasing = TRUE)[seq_len(min(ntop, length(rv)))]
+
+pca.df <- as.data.frame(t(prot_df[select,]))
+
+pca.df$timepoint <- rep(c("d01","d05","d10","d25"),each = 3)
+# Add timepoint information: "pre weaning" for d01, d05, d10 and "post weaning" for d25
+pca.df$condition <- ifelse(pca.df$timepoint %in% c("d01", "d05", "d10"),
+                           "pre weaning", "post weaning")
+
+
+pca <- prcomp(pca.df[,1:500], scale. = TRUE)
+
+color_values <- c("#E08B00","#5BB300","#7997FF","#FF61C9")
+
+# the basic set of common aesthetic settings for PCA plots, 
+pca.theme <- list(geom_point(size = 1.5),
+                  theme_classic() ,
+                  theme(text = element_text(size = 7, colour = "black"),
+                        axis.text = element_text(size = 7, 
+                                                 colour = "black"),
+                        legend.text = element_text(size = 7,
+                                                   colour = "black"),
+                        legend.key.size = unit(0.1,"cm"),
+                        legend.key.spacing.y = unit(0,"cm"),
+                        legend.margin = margin(t = 0, unit='cm'),
+                        legend.background = element_blank(),
+                        legend.title = element_blank(),
+                        legend.position = "inside",
+                        legend.position.inside = c(0.95,0.95),
+                        axis.title.x = element_text(margin =
+                                                      margin(t = -3)),
+                        axis.title.y = element_text(margin = 
+                                                      margin(r = -3)),
+                        axis.ticks.x = element_blank(),
+                        axis.ticks.y = element_blank(), 
+                        panel.border = element_rect(
+                          colour = "black",
+                          fill = NA, 
+                          linewidth = 1),
+                        aspect.ratio = 1)
+)
+
+pca$condition <- c(rep("pre weaning",11),rep("post weaning",3))
+
+fill_colors <-  c(
+   "pre weaning"    = "#619CFF",  # Medium Blue
+   "post weaning"   = "#F8766D"  # Medium Red
+)
+
+# Convert PCA results into a data frame for ggplot
+pca_data <- as.data.frame(pca$x)
+pca_data$timepoint <- pca.df$timepoint
+pca_data$condition <- pca.df$condition
+
+percentVar <- round(100 * (pca$sdev^2 / sum(pca$sdev^2)), 2)
+```
+
+```{r}
+# Create the PCA plot
+PCAplot_prot <- ggplot(pca_data, aes(x = PC1, y = PC2, color = timepoint)) +
+   ggtitle(element_blank()) +
+   #geom_point(size = 5) +
+   geom_hline(yintercept = 0, color = "gray", linewidth = 1) +
+   geom_vline(xintercept = 0, color = "gray", linewidth = 1) +
+   scale_colour_manual(values = color_values) +
+   scale_y_continuous(
+      limits = c(min(pca_data$PC2) - 4.1, max(pca_data$PC2 + 2.2)),
+   ) +
+   scale_x_continuous(
+      limits = c(min(pca_data$PC1) - 0.2, max(pca_data$PC1 + 0.45)),
+   ) +
+   labs(
+      x = glue::glue("PC1 ({percentVar[1]}%)"),
+      y = glue::glue("PC2 ({percentVar[2]}%)")
+   ) +
+   # Ellipses for each condition group
+   geom_mark_ellipse(aes(group = condition, fill = condition, 
+                         label = NULL), label.fill = NA,
+                     alpha = 0.2, color = NA, show.legend = FALSE,
+                     expand = unit(0.07, "cm")
+                     ) +  # Adjust expansion of the ellipse
+   scale_fill_manual(values = fill_colors) + pca.theme
+
+
+save_ggplot_formats(PCAplot_prot,
+                    plot_dir,
+                    "PCA_timepoints_circles_v2",
+                    width = 10,
+                    height = 10,
+                    units = "cm")
+```
+
+
+```{r}
+var <- get_pca_var(pca)
+contrib_df <- as.data.frame(var$contrib) %>% arrange(desc(Dim.1)) 
+
+write.xlsx(contrib_df,
+           file.path(plot_dir,
+                     "pca_driver_genes_proteomics.xlsx")
+           ,rowNames = TRUE
+)
+
+
+
+
+## Genes + PCA Biplots
+biplot_theme <- list(theme(axis.title = element_text(size = 5),
+                           axis.text = element_text(size = 5),
+                           legend.position = "none",
+                           text = element_text(size = 5),
+                           axis.ticks = element_blank()
+), ggtitle(element_blank())
+)
+
+biplot <- fviz_pca_biplot(pca, 
+                          repel = TRUE,
+                          select.var = list(contrib = 50),
+                          labelsize = 2, 
+                          stroke = NA) + biplot_theme
+
+save_ggplot_formats(
+   plt = biplot,
+   create_plot_subdir = FALSE,
+   base_plot_dir = plot_dir,
+   plt_name = glue("pca_biplot_prot"),
+   width = 2.7,height = 2.7
+)
+```
+
+# DE Analysis
+```{r}
+sample_anno <- sample_mapping %>% 
+  mutate(sample_anno = paste(timepoint,Replicate,sep = '_'),
+         strain_treat = paste(timepoint,sep = '_')) %>% 
+  as.data.frame()
+
+rownames(sample_anno) <- sample_anno$sample_anno
+
+colnames(prot_df) <- rownames(sample_anno)
+
+prot_df_num <- sapply(prot_df,as.numeric)
+
+rownames(prot_df_num) <- rownames(prot_df)
+
+sample_anno$condition <- c(rep("prWe",9),rep("poWe",3))
+```
+
+```{r}
+# We use limma as protein values are different from RNAseq counts.
+# limma fits against a linear model
+ 
+limma_results <- bind_rows(
+  lapply(seq(nrow(comparisons)),function(comp) {
+    sample_anno_tmp <- sample_anno[sample_anno$strain_treat %in%
+                                     as.character(comparisons[comp,]),]
+    prot_df_tmp <- prot_df_num[,rownames(sample_anno_tmp)]
+  
+    designMatrix <- model.matrix(~timepoint, sample_anno_tmp)
+    
+    fit <- lmFit(prot_df_tmp, design = designMatrix)
+    fit2 <- eBayes(fit)
+    resTab <- topTable(fit2, number = Inf, coef = colnames(designMatrix)[2])
+  
+    comp_df <- as.vector(comparisons[comp,] %>% as.data.frame())
+    if(sub('timepoint','',colnames(designMatrix)[2]) == comparisons[comp,1]) {
+     print(paste(comp,"if"))
+    resTab$comparison <- paste(sub('timepoint','',colnames(designMatrix)[2]),
+                              comp_df[!( comp_df  %in% 
+                                           sub('timepoint','',colnames(designMatrix)[2]))][[1]],
+                              sep = '_')
+   }else{
+     print(paste(comp,"else"))
+     resTab$comparison <- paste(comp_df[!(comp_df %in% 
+                                            sub('timepoint','',colnames(designMatrix)[2]))][[1]],
+                                sub('timepoint','',colnames(designMatrix)[2]),
+                                sep = '_')
+     resTab$logFC <- -resTab$logFC
+   }
+  resTab$gene_name <- rownames(resTab)
+  return(resTab)
+}))
+
+colnames(limma_results)[c(1,4,5,8)] <- c("log2FoldChange","pvalue","padj","symbol")
+limma_results$comparison <- as.factor(limma_results$comparison)
+limma_results$log2FoldChange <- -limma_results$log2FoldChange
+
+# some pretty plots which highlight Reg3a/b/c in the dataset 
+# (sanity check to see if everything was done right)
+limma_results %>% 
+  ggplot(aes(log2FoldChange,-log10(padj))) +
+  geom_point(size = 0.5) +
+  geom_point(data = filter(limma_results,padj < 0.05, abs(log2FoldChange) > 1),
+             color = 'red',size = 0.5) +
+  geom_point(data = filter(limma_results,grepl('Reg3',symbol)),
+             color = 'blue') +
+  ggrepel::geom_text_repel(data = filter(limma_results,grepl('Reg3',symbol)),
+                           aes(label = symbol),
+                           min.segment.length = 0,
+                           max.overlaps = Inf,
+                           force_pull = 0.1) + 
+  facet_wrap( ~ comparison) + 
+  theme_bw()
+```
+
+```{r}
+write.csv(prot_df_num, file.path(charts_folder,'raw_data_protdf.csv'))
+
+write.csv(limma_results, file.path(charts_folder,'limma_results_timepoints.csv'))
+```
+
+```{r}
+# Subset the data for the relevant conditions
+sample_anno_tmp <- sample_anno[sample_anno$condition %in% c("prWe", "poWe"), ]
+
+# Subset the numeric data matrix (prot_df_num) for the selected samples
+prot_df_tmp <- prot_df_num[, rownames(sample_anno_tmp)]
+
+# Create a design matrix for condition comparison
+designMatrix <- model.matrix(~condition, sample_anno_tmp)
+
+# Fit the linear model using limma
+fit <- lmFit(prot_df_tmp, design = designMatrix)
+fit2 <- eBayes(fit)
+
+# Extract results for the 'conditionpoWe' coefficient
+resTab <- topTable(fit2, number = Inf, coef = "conditionprWe")
+
+# Add comparison and gene name columnss
+resTab$comparison <- "prWe_poWe"  # Specify the comparison being made
+resTab$gene_name <- rownames(resTab)
+
+# Reverse the logFC values to make early to the left
+resTab$logFC <- -resTab$logFC
+
+resTab_filter <- resTab %>% filter(abs(logFC) > 1 & adj.P.Val < 0.05)
+
+write.xlsx(resTab_filter,file.path(charts_folder,"DE_pre_post_weaning.xlsx"))
+```
+
+# Volcano plots
+```{r DE plots}
+limma_results_split <- split(limma_results,limma_results$comparison)
+#names(limma_results_split) <- c("d01_d05","d01_d10","d01_d25","d05_d10","d05_d25","d10_d25")
+
+limma_results_split_filter <- lapply(limma_results_split,function(df){df %>% filter(abs(log2FoldChange) > 1 & padj < 0.05)})
+
+limma_results_split_filter <- limma_results_split_filter[c(1,6)]
+```
+
+```{r}
+final_workbook <- createWorkbook()
+
+# Process each Excel file
+for (i in 1:length(limma_results_split_filter)) {
+  # Extract the sheet name from the filename
+  sheet_name <- names(limma_results_split_filter)[i]
+  #sheet_name <- replace_weaning_terms(sheet_name)
+  # Read the data from the first sheet of the Excel file (no column names)
+  data <- limma_results_split_filter[[i]]
+  
+  # Rename the first column as 'symbol' and check for descriptions
+  description_df <- get_gene_description(data$symbol)
+  
+  # Reorder description_df to match the order of data$symbol
+  description_df <- description_df[match(data$symbol, description_df$mgi_symbol), ]
+  
+  # Add the description column to the data
+  data$description <- description_df$description
+  
+  data_subset <- data[c("symbol","description","log2FoldChange","padj")]
+
+  # Add the processed table as a new sheet in the final workbook
+  addWorksheet(final_workbook, sheet_name)
+  writeData(final_workbook, sheet_name,data_subset)
+}
+
+saveWorkbook(final_workbook, file.path(charts_folder,"limma_proteomics_DE.xlsx"), overwrite = TRUE)
+
+
+```
+
+
+```{r DE plots}
+plot.list <- generate_volcano_plots(results_list = lrs,
+                       pos_color = "#E41A1C",
+                       neg_color = "#377EB8",
+                       plots_folder = plots_folder,
+                       charts_folder = charts_folder,
+                       filename_prefix = "prot_top_bot20_connectors",
+                       save = FALSE,
+                       subset_condition = c(1,4,6) 
+                       )
+
+generate_volcano_plots(results_list = lrs,
+                       pos_color = "#E41A1C",
+                       neg_color = "#377EB8",
+                       plots_folder = plots_folder,
+                       charts_folder = charts_folder,
+                       filename_prefix = "prot_top_bot20_connectors",
+                       save = TRUE,
+                       subset_condition = c(1,4,6) 
+                       )
+
+dir.create(file.path(harddrive,"figures/figure_3/saves/"),recursive = TRUE)
+dir.create(file.path(harddrive,"figures/figure_3/plots/"),recursive = TRUE)
+
+saveRDS(plot.list,file.path(harddrive,"figures/figure_3/saves/volcanos_fig3_v2.Rds"))
+
+```
+
+```{r}
+#volcano pre post
+
+prepo_list <- list("prWe_poWe" = resTab)
+
+generate_volcano_plots(results_list = prepo_list,
+                       pos_color = "#E41A1C",
+                       neg_color = "#377EB8",
+                       plots_folder = plots_folder,
+                       charts_folder = charts_folder,
+                       filename_prefix = "prot_pre_post_top_bot10_connectors",
+                       save = TRUE,
+                       subset_condition = 1
+                       )
+
+```
+
+
+
+```{r DE plots}
+
+pos_color <-  "#E41A1C"
+neg_color <-  "#377EB8"
+quantile_values <- sapply(limma_results_split,function(x){
+  quantile(x$log2FoldChange,c(0.001,0.999))}
+  )
+
+xmin <- min(quantile_values)+1
+xmax <- max(quantile_values)-1
+
+p.cutoff <- min(sapply(limma_results_split,function(x){
+  quantile(x[x$padj >0,]$padj,0.001)}))
+
+for (comp in levels(limma_results$comparison)){
+  #comp="d01_d05"
+  
+  dayneg <- strsplit2(comp,split = "_")[1]
+  daypos <- strsplit2(comp,split = "_")[2]
+  
+  df <- limma_results[limma_results$comparison %in% comp,]
+  res <- df[,c("log2FoldChange","symbol","padj")] %>% arrange(-log2FoldChange)
+
+  # identify genes that pass the threshold
+  up <- rownames(subset(res, log2FoldChange >= xmax))
+  down <- rownames(subset(res, log2FoldChange <= xmin))
+  p.up <- rownames(subset(res, padj <= p.cutoff))
+  
+  # change log2FCs in the object to be max or min cutoff 
+  res$log2FoldChange <- ifelse(res$log2FoldChange >= xmax, xmax,
+                                   ifelse(res$log2FoldChange <= xmin, xmin,
+                                          res$log2FoldChange))
+  # also change p.adj accordingly
+  #res$padj <- ifelse(res$padj <= p.cutoff, p.cutoff, res$padj)
+
+  #top 20
+  top20 <- res %>% top_n(20,log2FoldChange) %>% arrange(-log2FoldChange)
+  
+  #bot 20
+  bot20 <- res %>% slice_min(log2FoldChange,n = 20) %>%
+    arrange(-log2FoldChange)
+  
+  #Only those which are significant
+  top20 <- subset(top20, subset = padj < 0.05 & log2FoldChange > 1) 
+  bot20 <- subset(bot20, subset = padj < 0.05 & log2FoldChange < - 1)
+    
+  # custom shapes for the points
+  customshape <- rep(19, nrow(res))
+  names(customshape) <- rep('normal', nrow(res))
+  
+  #shape of the arrow facing right
+  customshape[which(rownames(res) %in% up)] <- -9658
+  names(customshape)[which(rownames(res) %in% up)] <- '> LFC'
+  
+  #shape of the arrow facing up
+  customshape[which(rownames(res) %in% p.up)] <- 17
+  names(customshape)[which(rownames(res) %in% p.up)] <- 'padj'
+  
+  #shape of the arrow facing left
+  customshape[which(rownames(res) %in% down)] <- -9668
+  names(customshape)[which(rownames(res) %in% down)] <- '< LFC'
+  
+  # custom sizes for the points
+  customsize <- rep(2.0, nrow(res))
+  customsize [which(rownames(res) %in% up)] <- 4
+  customsize [which(rownames(res) %in% p.up)] <- 4
+  customsize [which(rownames(res) %in% down)] <- 4
+  
+  keyvals <- ifelse(
+    res$log2FoldChange <= -1 & res$padj <= 0.05, neg_color,
+    ifelse(res$log2FoldChange  >= 1 & res$padj <= 0.05, pos_color,
+           'grey'))
+  
+  keyvals[is.na(keyvals)] <- 'grey'
+  names(keyvals)[keyvals == neg_color] <- glue('up in {dayneg}')
+  names(keyvals)[keyvals == 'grey'] <- 'ns'
+  names(keyvals)[keyvals == pos_color] <- glue("up in {daypos}")
+
+  #data.frame is needed for dplyr filter to work
+  df <- as.data.frame(res[c("log2FoldChange","symbol","padj")]) %>%
+    arrange(-log2FoldChange)
+
+  up_genes <- nrow(df %>% filter(log2FoldChange >= 1 & padj <= 0.05) )
+  down_genes <- nrow(df %>% filter(log2FoldChange <= -1 & padj <= 0.05))
+  
+  res$log2FoldChange<-as.numeric(res$log2FoldChange)
+  plt <- EnhancedVolcano(res,
+                           lab = res$symbol,
+                           x = 'log2FoldChange',
+                           y = 'padj',
+                           xlab = bquote(~Log[2]~'fold change'),
+                           ylab = bquote(~-Log[10]~'p.adj.'),
+                           selectLab = c(bot20$symbol,top20$symbol),
+                           #selectLab = contrib_genes,
+                           #selectLab = contrib_intersect,
+                           #drawConnectors = FALSE,
+                           drawConnectors = TRUE,
+                           widthConnectors = 0.5,
+                           arrowheads = FALSE,
+                           max.overlaps = 10,
+                           colCustom = keyvals,
+                           pCutoff = 0.05,
+                           FCcutoff = 1.0,
+                           boxedLabels = FALSE,
+                           colAlpha = 0.5,
+                           labSize = 2,
+                           pointSize = 1,
+                           axisLabSize = 5,
+                           titleLabSize = 5,
+                           subtitleLabSize = 5,
+                           captionLabSize = 5,
+                           legendLabSize = 5,
+                           legendIconSize = 2,
+                           #legendPosition = "right",
+                           #shapeCustom = custom_shape,
+                           #pointSize = custom_size,
+                           #title = glue("{daypos} vs. {dayneg}"),
+                           #subtitle = glue("{dayneg}:{down_genes} {daypos}:{up_genes}"),
+                           #caption = paste0("total = ", nrow(res), " genes"),
+                           title = NULL,
+                           subtitle = NULL,
+                           caption = NULL,
+                           legendLabels = NULL,
+                           xlim = c(xmin,xmax)
+                           ) + theme(axis.line = element_line(linewidth = 0.5),
+                                     axis.ticks = element_blank(),
+                                     legend.position = "none"
+                                     )
+    
+  save_ggplot_formats(
+    plt = plt,
+    base_plot_dir = plots_folder,
+    plt_name = glue("Volcano_proteomics_{dayneg}_vs_{daypos}v"),
+    width = 7, height = 7
+    )
+  
+    df2 <- res %>% filter(log2FoldChange>= 1 & padj<=0.05 |
+      log2FoldChange <= -1 & padj<=0.05)
+
+    write.csv(df2,file = file.path(charts_folder,
+      glue("DE_proteomics_{dayneg}vs.{daypos}.csv")),
+              row.names = FALSE)
+}
+```
+

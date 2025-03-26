@@ -1,0 +1,143 @@
+---
+title: "DE_RNA_seq_crypt_villus"
+author: "Johannes Schöneich"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r}
+library(EnhancedVolcano)
+library(tidyverse)
+library(DESeq2)
+library(limma)
+library(glue)
+library(clusterProfiler)
+library(DOSE)
+library(enrichplot)
+library(cowplot)
+library(patchwork)
+library(openxlsx)
+
+harddrive <- "H:"
+source(file.path(harddrive,"helper_functions.R"))
+source(file.path(harddrive,"DE_analysis/DE_helperfunctions.R"))
+```
+
+```{r}
+dds_fullsample <- readRDS(file.path(harddrive,
+ "RNA_seq/RNAseq_crypt_villus/dds_LRT_group_RNAseq_crypt_villus.Rds"))
+
+#condition to analyse: e.g. timepoint, condition
+condition <- "group"
+
+analysis_folder <- file.path(harddrive,
+                             "DE_analysis/DE_LRT_crypt_villus_group")
+
+plots_folder <- file.path(analysis_folder,"DE/plots")
+charts_folder <- file.path(analysis_folder,"DE/charts")
+
+if (!dir.exists(analysis_folder)){
+  dir.create(analysis_folder,recursive = TRUE)
+  dir.create(plots_folder,recursive = TRUE)
+  dir.create(charts_folder,recursive = TRUE)
+}
+
+#optional: read in the results.list if this analysis was already run and you want to change plots
+results.list <- readRDS(file.path(analysis_folder,
+                                  glue("DE_results.list_{condition}.Rds")))
+```
+
+## Volcano Plots DE genes
+
+The contrast order is always +logFC then -logFC 
+(first numerator (Zähler) then Denominator (Nenner))
+condition treated vs untreated, tells you that the estimates are of the 
+logarithmic fold change log2(treated/untreated).
+
+The level given last is the base level for the comparison. The syntax is:
+contrast <- c("condition", "level_to_compare", "base_level")
+for example, if we observe a log2 fold change of -2 this would mean the gene expression is lower 
+in the level of interest relative to the base level
+
+```{r, warning=FALSE}
+#every pairwise combination of timepoints
+combination <- combn(levels(colData(dds_fullsample)[,condition]), 2)
+#catch the error if underscore is used in the name
+#combination <- gsub("_","-",combination)
+
+list.names <- capture.output(apply(combination,2,
+                                   function(x){cat(x,sep = "_", fill = TRUE)}))
+list.names <- list.names[which(list.names!="NULL")]
+
+if(!exists("results.list")){
+  #make an empty list with all combinations
+  results.list <- sapply(list.names,function(x) NULL)
+
+for(i in 1:length(results.list)){
+  print(i)
+  #paste("working on", list.names[i])
+  results.list[[i]] <- results(dds_fullsample,
+                               contrast = c(condition, combination[1,i],
+                                                          combination[2,i]),
+                               cooksCutoff = TRUE,
+                               independentFiltering = TRUE,
+                               alpha=0.05,
+                               pAdjustMethod="BH")
+
+  results.list[[i]] <- lfcShrink(dds_fullsample, contrast = c(condition,
+                                                              combination[1,i], 
+                                                            combination[2,i]), 
+                       res = results.list[[i]],
+                       type = "ashr")
+}
+
+results.list <- lapply(results.list,function(x){x$symbol <- rownames(x);return(x)})
+sapply(results.list,function(x){sum(is.na(x))}) #are there any NAs left?
+results.list <- lapply(results.list,function(x){na.omit(x)})
+
+#change logfc so that early is to the left.
+results.list <- lapply(results.list,
+                       function(res){
+                         res$log2FoldChange <- -res$log2FoldChange
+                         return(res)
+                         }
+                       )
+
+saveRDS(results.list,file =
+          file.path(analysis_folder,glue("DE_results.list_{condition}.Rds")))
+}
+```
+
+```{r}
+# Define the timepoints
+timepoints <- c("d01", "d05", "d10", "d25")
+
+# Create vector for crypts
+crypts_vector <- paste0(timepoints[-length(timepoints)], 
+                        ".crypts_", timepoints[-1], ".crypts")
+
+# Create vector for villi
+villi_vector <- paste0(timepoints[-length(timepoints)], 
+                       ".villi_", timepoints[-1], ".villi")
+
+generate_volcano_plots(results_list = results.list,
+                       pos_color = "#E41A1C",
+                       neg_color = "#377EB8",
+                       plots_folder = plots_folder,
+                       charts_folder = charts_folder,
+                       filename_prefix = "crypts_intra",
+                       save = TRUE,
+                       subset_condition = crypts_vector
+                       )
+
+
+generate_volcano_plots(results_list = results.list,
+                       pos_color = "#E41A1C",
+                       neg_color = "#377EB8",
+                       plots_folder = plots_folder,
+                       charts_folder = charts_folder,
+                       filename_prefix = "villi_intra",
+                       save = TRUE,
+                       subset_condition = villi_vector
+                       )
+```

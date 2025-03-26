@@ -1,0 +1,395 @@
+---
+title: "single_cell_manual_analysis"
+author: "Johannes Schöneich"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+# Load libraries
+```{r}
+library(Seurat)
+library(tidyverse)
+library(ggsci)
+library(Hmisc)
+library(archive)
+library(scales)
+library(gridExtra)
+library(glue)
+library(patchwork)
+```
+
+# Adjustments
+```{r}
+harddrive  <- "H:"
+
+source(file.path(harddrive,"helper_functions.R"))
+source(file.path(harddrive,"save_load_helper.R"))
+source(file.path(harddrive,"scrna_datasets/single_cell_themes.R"))
+
+analysis_folder <- file.path(harddrive,
+                          "scrna_datasets/scrna_both_d25",
+                          "scrna_full_2024_both_d25_gob_pan_three",
+                          "scrna_full_2024_both_d25_gob_pan_three_inf",
+                          "save")
+
+cluster_use <- "gob_pan_mix"
+```
+
+```{r}
+scrna <- load_object(file.path(analysis_folder,
+                                            "/save/scrna_phase_clustering.Rds"))
+
+plots_folder <- file.path(analysis_folder,"analysis/plots")
+
+charts_folder <- file.path(analysis_folder,"analysis/charts/")
+```
+
+```{r}
+GO_save_folder <- file.path(analysis_folder,"saves/")
+
+pathway_save_folder <- file.path(analysis_folder,"Pathway/saves/")
+
+# Which ontology: choose between all, biological process (bp), 
+# molecular function (mf) and cellular component (cc).
+ont <- "bp"
+
+# P-adjust cutoff. Adjustment method is benjamini-hochberg (FDR)
+p.cutoff <- 0.05
+
+# The number of GO terms to compare
+topN  <- 10
+
+# Count cutoff. The low end filtering of counts
+count.cutoff <- 10
+
+# Heatmap coloring options
+pos_color_low <- "#fff5f0"
+pos_color_high <- "#E41A1C" # The color to which the significant p-values converge
+
+neg_color_low <- "#F7FBFF"
+neg_color_high <- "#377EB8"
+
+inf_cols <- c("#E08B00","#5BB300","#00C0AF","#7997FF","#FF61C9")
+uninf_cols  <- c("#E08B00","#5BB300","#7997FF","#FF61C9")
+```
+
+```{r}
+"Xist" %in% rownames(scrna) #if FALSE, its correct.
+
+DimPlot(scrna, reduction = "INTE_UMAP", 
+                group.by =  cluster_use,
+                label = TRUE)
+
+DimPlot(scrna, reduction = "INTE_UMAP", 
+                group.by =  "stage",
+                label = TRUE)
+```
+
+```{r}
+scrna_inf <- load_object(file.path(analysis_folder,"scrna_inf_both_d25_gob.Rds"))
+
+scrna_uninf <- load_object(file.path(analysis_folder,
+                                     "scrna_uninf_both_d25_gob.Rds"))
+```
+
+```{r, fig.width = 30}
+#TODO bring order into the chaos
+Idents(scrna) <- "integrated_snn_res.0.8"
+p <- DimPlot(scrna, reduction = "INTE_UMAP",split.by = "integrated_snn_res.0.8")
+
+save_ggplot_formats(
+  plt = p,
+  base_plot_dir = plots_folder,
+  plt_name = "dimplot_0.8_split",
+  width = 24, height = 6
+)
+
+# Generate a list of plots
+plot_list_sc <- lapply(seq_along(levels(scrna$integrated_snn_res.0.8)), 
+                    generate_split_plot, 
+                    scrna = scrna, 
+                    levels = levels(scrna$integrated_snn_res.0.8))
+
+my_grid <- wrap_plots(plot_list_sc)
+
+save_ggplot_formats(
+  plt = my_grid,
+  base_plot_dir = plots_folder,
+  plt_name = "grid_seurat",
+  width = 12, height = 16
+)
+
+Idents(scrna) <- "stage"
+# Generate a list of plots
+plot_list_stage <- lapply(seq_along(unique(scrna$stage)), 
+                    generate_plot, scrna = scrna, 
+                    levels = unique(scrna$stage)
+                    )
+
+stage_grid <- wrap_plots(plot_list_stage)
+
+save_ggplot_formats(
+  plt = stage_grid,
+  base_plot_dir = plots_folder,
+  plt_name = "grid_stage",
+  width = 12, height = 16
+)
+```
+
+```{r}
+paneth_markers <- c("Lyz1","Muc2","Defa3","Defa26","Defa21",
+                    "Mptx2", "Fabp1", "Mmp7")
+
+fp <- FeaturePlot(
+  object = scrna_uninf,
+  pt.size = 0.01,
+  label = FALSE,
+  features = paneth_markers,
+  reduction = "INTE_UMAP",
+  order = TRUE,
+  cols = c("lightgrey", "red"),
+  ncol = 4,
+  max.cutoff = "q95"
+) & fp_theme
+
+vp <- VlnPlot(scrna_uninf,
+        features = paneth_markers,
+        group.by = "integrated_snn_res.0.8",
+        ncol = 4,
+        pt.size = 0,
+        sort = TRUE
+        ) & theme(axis.title.x = element_blank())
+```
+
+```{r}
+save_ggplot_formats(
+  plt = fp,
+  base_plot_dir = plots_folder,
+  plt_name = "fp_paneth4",
+  width = 12, height = 4
+)
+
+save_ggplot_formats(
+  plt = vp,
+  base_plot_dir = plots_folder,
+  plt_name = "vp_paneth4",
+  width = 12, height = 4
+)
+```
+
+```{r}
+scrna$gob_pan_mix <- scrna$integrated_snn_res.0.8
+
+Idents(scrna) <- "integrated_snn_res.0.8"
+
+new.cluster.ids <- c(rep("Intermediate",3),"Goblet","Intermediate",
+                     "Paneth","delete","Intermediate","Goblet")
+levels(scrna$gob_pan_mix) <- new.cluster.ids
+
+Idents(scrna) <- scrna$gob_pan_mix
+
+DimPlot(scrna, group.by = "gob_pan_mix", reduction = "INTE_UMAP")
+
+plot <- DimPlot(scrna, group.by = "gob_pan_mix", reduction = "INTE_UMAP")
+
+select.cells <- CellSelector(plot)
+scrna <- subset(scrna, cells = select.cells, invert = TRUE)
+
+Idents(scrna) <- "gob_pan_mix"
+scrna <- subset(scrna, idents = "delete", invert = TRUE)
+DimPlot(scrna, group.by = "gob_pan_mix", reduction = "INTE_UMAP")
+
+scrna$gob_pan_mix <- droplevels(scrna$gob_pan_mix)
+
+scrna$gob_pan <- droplevels(scrna$gob_pan_mix)
+
+gob_pan_levels <- c("Goblet","Goblet","Paneth")
+levels(scrna$gob_pan) <- gob_pan_levels
+```
+
+```{r}
+scrna_uninf <- scrna_inf[,!scrna_inf@meta.data$name == "d05i"]
+
+scrna_uninf$name <- as.factor(scrna_uninf$name)
+
+save_object(scrna,
+            file_name = file.path(analysis_folder,"scrna_both_d25_gob.Rds"))
+
+save_object(scrna_uninf,
+            file_name = file.path(analysis_folder,"scrna_uninf_both_d25_gob.Rds"))
+```
+
+```{r}
+scrna <- scrna_uninf
+levels(scrna$gob_pan_mix)[1] <- "Intermediate"
+
+help_sort_func <- ifelse(
+  all.is.numeric(unique(scrna@meta.data[, cluster_use])),
+  function(x) as.numeric(as.character(x)),
+  as.character
+)
+
+cluster_use <- "gob_pan_mix"
+scrna@meta.data[,cluster_use] <- help_sort_func(scrna@meta.data[,cluster_use])
+
+cluster_proportion <- t(prop.table(x = table(scrna@meta.data[, cluster_use],
+                                                  scrna@meta.data$stage),
+                                        margin = 2))
+
+cluster_proportion_cluster <- t(prop.table(x = table(scrna@meta.data$stage,
+                                                  scrna@meta.data[, cluster_use]),
+                                        margin = 2))
+
+cp.df <- as.data.frame(cluster_proportion)
+colnames(cp.df) <- c("timepoint","cluster","proportion")
+
+cp.df_cluster <- as.data.frame(cluster_proportion_cluster)
+colnames(cp.df_cluster) <- c("cluster","timepoint","proportion")
+
+# Create the stacked barplot using ggplot2
+barplot_cluster <- ggplot(cp.df_cluster, 
+                          aes(x = cluster, y = proportion, fill = timepoint)) +
+  geom_bar(stat = "identity", position = "stack", width = 0.2) +
+  geom_text(
+    aes(label = ifelse(proportion >= 0.02, 
+                       sprintf("%.1f%%", proportion * 100), "")),
+    position = position_stack(vjust = 0.5), size = 2
+  ) + 
+   labs(x = NULL, y = NULL, title = NULL) +
+    scale_fill_manual(values = uninf_cols) + scale_x_discrete(
+    expand = expansion(mult = c(0.2,0))
+    ) +
+  barplot_theme + theme(legend.key.size = unit(0.3,"cm"),
+                        panel.background = element_blank())
+  
+barplot_cluster
+```
+
+
+```{r}
+
+gob_cols <-  c("#00BF7D", "#00A2A2", "#006B6B")
+#cp.df <- cp.df %>% mutate(timepoint = fct_relevel(timepoint, c("d01","d05","d10","d25","d05i")))
+barplot_stage <- ggplot(cp.df, aes(x = timepoint, y = proportion, fill = cluster)) +
+   geom_bar(stat = "identity", position = "stack", width = 0.3) +
+  geom_text(
+    aes(label = ifelse(proportion >= 0.02, 
+                       sprintf("%.1f%%", proportion * 100), "")),
+    position = position_stack(vjust = 0.5), size = 2
+  ) + 
+   labs(x = NULL, y = NULL, title = NULL) +
+    scale_fill_manual(values = gob_cols) + 
+  barplot_theme + theme(legend.key.size = unit(0.3,"cm"),
+                        panel.background = element_blank())
+```
+
+```{r}
+tbl <- table(scrna@meta.data[, cluster_use],
+             scrna$stage)
+rowsums <- rowSums(tbl)
+tbl <- cbind(tbl, rowsums)
+colsums <- colSums(tbl)
+tbl <- rbind(tbl, colsums)
+```
+
+```{r}
+png(file.path(plots_folder,"png/table_proportions_gob_stage.png"), 
+    res = 200, width = 1100, height = 450)
+p <- tableGrob(tbl, theme = ttheme_default())
+grid.arrange(p)
+dev.off()
+
+save_ggplot_formats(
+  plt = barplot_stage,
+  base_plot_dir = plots_folder,
+  plt_name = "barplot_proportion_gob_stage",
+  width = 4, height = 1.25
+)
+```
+
+
+```{r}
+
+plots_folder <- file.path(harddrive,"/figures/figure_6")
+
+save_ggplot_formats(
+  plt = barplot_cluster,
+  base_plot_dir = plots_folder,
+  plt_name = "barplot_proportion_gob_cluster",
+  width = 4, height = 1.25
+)
+```
+
+```{r}
+scrna <- scrna_inf
+
+scrna$stage <- as.factor(scrna$stage)
+
+# Define a function to generate the plots
+generate_split_plot <- function(i, scrna, cols) {
+# current_level <- levels(scrna$stage)[i]
+  current_level <- levels(scrna$gob_pan_mix)[i]
+  cell_number <- table(scrna$gob_pan_mix)[i]
+  cols.highlight <- cols[i]
+  title <- glue("{current_level}") #({cell_number})
+  DimPlot(scrna, 
+          label = FALSE, 
+          reduction = "INTE_UMAP", 
+          cells.highlight = WhichCells(scrna, idents = current_level),
+          cols.highlight = cols.highlight,
+          cols = "lightgrey",
+          sizes.highlight = 1) +
+    ggtitle(title) + mini_umap_theme & NoLegend() 
+} 
+
+# # Generate a list of plots
+# plot_list_uninf <- lapply(seq_along(levels(scrna$name)), 
+#                     generate_split_plot, scrna = scrna, cols = uninf_cols)
+
+plot_list_inf <- lapply(seq_along(levels(scrna$stage)), 
+                    generate_split_plot, scrna = scrna, cols = inf_cols)
+
+plot_list_inf[[6]] <- DimPlot(scrna, reduction = "INTE_UMAP", group.by = "stage") + 
+  ggtitle(glue("All ({sum(table(scrna$stage))})")) & mini_umap_theme 
+
+
+plot_grid_inf <- wrap_plots(plot_list_inf)
+
+print(plot_grid_inf)
+scrna$gob_pan_mix <- as.factor(scrna$gob_pan_mix)
+Idents(scrna) <- "gob_pan_mix"
+
+plot_list_gpm <- lapply(seq_along(levels(scrna$gob_pan_mix)), 
+                    generate_split_plot, 
+                    scrna = scrna,
+                    cols =  gob_cols
+                    #cols = hue_pal()(3)
+                    )
+
+#"#F8766D" "#A3A500" "#00BF7D" "#00B0F6" "#E76BF3"
+#"#F8766D" "#00BA38" "#619CFF"
+plot_grid_gpm <- wrap_plots(plot_list_gpm, nrow = 1)
+
+```
+
+```{r}
+
+save_ggplot_formats(
+  plt = plot_grid_inf,
+  base_plot_dir = plots_folder,
+  plt_name = "plot_grid_inf_gob",
+  width = 12, height = 8
+)
+
+plots_folder = "H:/figures/figure_6"
+
+save_ggplot_formats(
+  plt = plot_grid_gpm,
+  base_plot_dir = plots_folder,
+  plt_name = "plot_grid_gob_pan_mix_v3",
+  width = 6, height = 2
+)
+
+
+```
+

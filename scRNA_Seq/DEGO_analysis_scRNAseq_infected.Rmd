@@ -1,0 +1,341 @@
+---
+title: "DE_scRNA"
+author: "Johannes Schöneich"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r}
+library(EnhancedVolcano)
+library(tidyverse)
+library(Seurat)
+library(limma)
+library(glue)
+library(VennDiagram)
+library(cowplot)
+library(ComplexHeatmap)
+library(clusterProfiler)
+library(enrichplot)
+library(DOSE)
+library(limma)
+library(ReactomePA)
+library(openxlsx)
+library(cowplot)
+library(gridExtra)
+library(patchwork)
+library(openxlsx)
+
+harddrive <- "H:"
+
+source(file.path(harddrive,"save_load_helper.R"))
+source(file.path(harddrive,"helper_functions.R"))
+source(file.path(harddrive,"DE_analysis/DE_helperfunctions.R"))
+source(file.path(harddrive,"scrna_datasets/single_cell_themes.R"))
+```
+
+```{r}
+tools <- load_object(file.path(harddrive,"scrna_datasets/scrna_both_d25/",
+                      "scrna_full_2024_both_d25_broad_inf/save/",
+                      "tools_scrna_broad_inf.Rds"))
+
+analysis_folder <- "scrna_datasets/infected_d05"
+
+plots_folder <- file.path(harddrive,analysis_folder,"DE/plots")
+charts_folder <- file.path(harddrive,analysis_folder,"DE/charts")
+
+GO_save_folder <- file.path(analysis_folder,
+                          "GO/saves/")
+
+pathway_save_folder <- file.path(analysis_folder,
+                          "Pathway/saves/")
+
+# Which ontology: choose between all, biological process (bp), 
+# molecular function (mf) and cellular component (cc).
+ont <- "bp"
+
+# P-adjust cutoff. Adjustment method is benjamini-hochberg (FDR)
+p.cutoff <- 0.05
+
+# The number of GO terms to compare per cluster
+topN  <- 5
+
+# Count cutoff. The low end filtering of counts
+count.cutoff <- 5
+
+# Heatmap coloring options
+pos_color_low <- "#fff5f0"
+pos_color_high <- "#E41A1C" # The color to which the significant p-values converge
+
+neg_color_low <- "#F7FBFF"
+neg_color_high <- "#377EB8"
+
+# One of GO, KEGG, Reactome or all
+comparison <- "GO"
+
+#analysis name for plot names
+NAME <- "GO"
+
+dir.create(analysis_folder,recursive = TRUE)
+dir.create(plots_folder,recursive = TRUE)
+dir.create(charts_folder,recursive = TRUE)
+dir.create(GO_save_folder,recursive = TRUE)
+dir.create(pathway_save_folder,recursive = TRUE)
+
+# read in the results.list if this analysis was already run 
+# and you want to change plots
+results.list <- tools[["dego_name_int_0.3_broad"]]$de$d05.vs.d05i
+```
+
+## Volcano Plots DE genes
+
+The contrast order is always +logFC then -logFC 
+(first numerator (Zähler) then Denominator (Nenner))
+condition treated vs untreated, tells you that the estimates are of the 
+logarithmic fold change log2(treated/untreated).
+
+The level given last is the base level for the comparison. The syntax is:
+contrast <- c("condition", "level_to_compare", "base_level")
+for example, if we observe a log2 fold change of -2 this would mean 
+the gene expression is lower in the level of interest relative to the base level
+
+```{r}
+#change logfc so that infected is right, uninfected left
+results.list <- lapply(results.list,
+                       function(res){
+                         res$avg_log2FC <- -res$avg_log2FC
+                         return(res)
+                         }
+                       )
+```
+
+```{r fig.height = 10, fig.width = 10}
+generate_volcano_plots(results_list = results.list,
+                       pos_color = "#E41A1C",
+                       neg_color = "#377EB8",
+                       plots_folder = plots_folder,
+                       charts_folder = charts_folder,
+                       filename_prefix = "Full")
+```
+
+```{r}
+# unique DE genes for infection
+
+infected_genes <- lapply(results.list,function(x){
+  as.data.frame(x) %>% filter(avg_log2FC >= 1 & p_val_adj <= 0.05) %>% pull(gene)
+})
+
+infected_genes$Tuft <- NULL
+
+# Create a binary presence matrix for UpSet plot
+gene_names <- unique(unlist(infected_genes))
+
+presence_matrix <- sapply(infected_genes, function(genes) gene_names %in% genes)
+
+rownames(presence_matrix) <- gene_names
+
+# Convert to a logical matrix for UpSet plot
+presence_matrix <- as.matrix(presence_matrix)
+
+mat <- make_comb_mat(infected_genes)
+
+mat_low_filter <- mat[comb_size(mat) >= 10]
+
+# Create the UpSet plot
+us_plot <- UpSet(mat_low_filter,
+      top_annotation = upset_top_annotation(mat_low_filter, add_numbers = TRUE),
+      right_annotation = upset_right_annotation(mat_low_filter, add_numbers = TRUE),
+      comb_order = rev(order(comb_size(mat_low_filter))),
+      )
+```
+
+```{r}
+save_ggplot_formats(
+  plt = us_plot,
+  base_plot_dir = plots_folder,
+  plot_obj = "not_gg",
+  plt_name = "upset_unique_low_end_filter",
+  width = 6, height = 3
+)
+```
+
+```{r}
+# Define the binary string labels corresponding to the unique genes
+labels <- c("1000", "0100", "0010", "0001")
+
+# Create an empty list to store results
+unique_genes_list <- list()
+
+# Loop over the labels and store the results
+for (i in seq_along(labels)) {
+  unique_genes_list[[i]] <- extract_comb(mat, labels[i])
+}
+
+# Assign meaningful names to the list elements
+names(unique_genes_list) <- c("abs.ent_unique", "eec_unique", "gp_unique", "stem_unique")
+
+
+# Custom function to convert a number to a binary string with leading zeros
+to_binary <- function(x, digits = 4) {
+  binary <- intToBits(x)[1:digits]
+  paste(rev(as.integer(binary)), collapse = "")
+}
+
+# Define the names for the primary sets
+names_map <- list(
+  "1000" = "Abs.Ent.",
+  "0100" = "EEC",
+  "0010" = "Goblet+Paneth",
+  "0001" = "Stem"
+)
+
+# Generate the list of all combinations
+all_combinations <- list()
+
+# Loop through all binary combinations (0001 to 1111)
+for (i in 1:15) {
+  # Convert to 4-digit binary string
+  binary_code <- to_binary(i)
+  
+  # Extract geneset using the binary code
+  geneset <- extract_comb(mat, binary_code)
+  
+  # Determine the name of the set
+  if (binary_code %in% names(names_map)) {
+    set_name <- names_map[[binary_code]]
+  } else {
+    # For combinations, concatenate the names of relevant sets
+    active_sets <- strsplit(binary_code, "")[[1]] == "1"
+    set_name <- paste(names_map[names(names_map)[active_sets]], collapse = " + ")
+  }
+  
+  # Add to the list
+  all_combinations[[set_name]] <- geneset
+}
+
+names(all_combinations)[15] <- "Common response"
+# Save the list to an Excel file
+write.xlsx(all_combinations,
+           file = file.path(charts_folder,"infected_all_combinations.xlsx"), 
+           asTable = FALSE)
+```
+
+# GO analysis
+```{r}
+genes_entrez <- lapply(unique_genes_list,function(upgene){
+  gene_e <- bitr(upgene, fromType="SYMBOL", toType = "ENTREZID", 
+                    OrgDb = "org.Mm.eg.db")
+  return(gene_e[["ENTREZID"]])
+})
+
+
+if(comparison == "GO"| comparison == "all"){
+  unique_infected_compare_GO <- compareCluster(unique_genes_list,
+                             fun = enrichGO,
+                             OrgDb = "org.Mm.eg.db",
+                             keyType = "SYMBOL",
+                             ont = ont,
+                             pAdjustMethod = "BH",
+                             pvalueCutoff  = p.cutoff,
+                             readable = TRUE
+                             )
+  
+  write.csv(as.data.frame(unique_infected_compare_GO),
+            file = file.path(charts_folder,
+                             "unique_infected_compare_GO.csv"),
+            row.names = FALSE)
+  unique_infected_compare <- unique_infected_compare_GO
+}
+
+if(comparison == "Reactome"| comparison == "all"){
+  unique_infected_compare_reactome <- compareCluster(genes_entrez,
+                             fun = enrichPathway,
+                             organism = "mouse",
+                             pAdjustMethod = "BH",
+                             pvalueCutoff  = p.cutoff,
+                             readable = TRUE
+                             )
+  
+  write.csv(as.data.frame(unique_infected_compare_reactome),
+            file = file.path(charts_folder,
+                             "unique_infected_compare_reactome.csv"),
+            row.names = FALSE)
+  unique_infected_compare <- unique_infected_compare_reactome
+}
+
+if(comparison == "KEGG"| comparison == "all"){
+  unique_infected_compare_KEGG <- compareCluster(genes_entrez,
+                             fun = enrichKEGG,
+                             organism = "mmu",
+                             pAdjustMethod = "BH",
+                             pvalueCutoff  = p.cutoff,
+                             )
+  
+    unique_infected_compare_KEGG <- setReadable(unique_infected_compare_KEGG, 
+                                   "org.Mm.eg.db",
+                                   keyType = "ENTREZID")
+    
+    unique_infected_compare_KEGG@compareClusterResult$Description <- gsub(
+      " - Mus musculus \\(house mouse)","",
+      unique_infected_compare_KEGG@compareClusterResult$Description)
+    
+  write.csv(as.data.frame(unique_infected_compare_KEGG),
+            file = file.path(charts_folder,
+                             "unique_infected_compare_Kegg.csv"),
+            row.names = FALSE)
+  unique_infected_compare <- unique_infected_compare_KEGG
+}
+```
+
+# Save results
+```{r}
+saveRDS(unique_infected_compare_GO,
+        file.path(GO_save_folder,"unique_infected_compare_GO.Rds"))
+saveRDS(unique_infected_compare_KEGG,
+        file.path(pathway_save_folder,"unique_infected_compare_kegg.Rds"))
+saveRDS(unique_infected_compare_reactome,
+        file.path(pathway_save_folder,"unique_infected_compare_reactome.Rds"))
+```
+
+```{r}
+unique_infected_compare_GO <-
+  readRDS(file.path(GO_save_folder,"unique_infected_compare_GO.Rds"))
+```
+
+```{r}
+generate_volcano_plots(results_list = results.list[1:4],
+                       pos_color = "#E41A1C",
+                       neg_color = "#377EB8",
+                       plots_folder = plots_folder,
+                       charts_folder = charts_folder
+                       )
+```
+
+```{r}
+generate_volcano_plots_mark_unique(
+  results_list = results.list,
+  unique_genes_list = unique_genes_list,
+  pos_color = "#E41A1C",
+  neg_color = "#377EB8",
+  mark_color = "purple",
+  plots_folder = plots_folder,
+  charts_folder = charts_folder,
+  filename_prefix = "Full_unique_purple",
+  save = TRUE,
+  subset_condition = 1:4
+  )
+```
+
+
+```{r}
+volcanos_unique_infected <- generate_volcano_plots_mark_unique(
+  results_list = results.list[1:4],
+  unique_genes_list = unique_genes_list,
+  pos_color = "#E41A1C",
+  neg_color = "#377EB8",
+  mark_color = "purple",
+  plots_folder = plots_folder,
+  charts_folder = charts_folder,
+  filename_prefix = "Full_unique_purple",
+  save = FALSE
+  )
+```

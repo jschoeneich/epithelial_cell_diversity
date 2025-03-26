@@ -1,0 +1,557 @@
+---
+title: "GO_dotplot"
+author: "Johannes Schöneich"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+# Load libraries
+```{r}
+library(clusterProfiler)
+library(enrichplot)
+library(DOSE)
+library(tidyverse)
+library(glue)
+library(limma)
+library(ReactomePA)
+```
+
+# Adjustments
+```{r}
+harddrive  <- "H:"
+
+analysis_folder <- file.path(harddrive,"DE_analysis/DE_LRT_uninfected")
+
+source(file.path(harddrive,"helper_functions.R"))
+source(file.path(harddrive,"DE_analysis/DE_helperfunctions.R"))
+
+
+results.list <- readRDS(
+  file.path(analysis_folder,
+            "/DE_results.list_timepoint.Rds"))
+
+results.list_filter <- results.list[c("d01_d05","d05_d10","d10_d25")]
+
+plots_folder <- file.path(analysis_folder,
+                          "GO/plots")
+
+charts_folder <- file.path(analysis_folder,
+                          "GO/charts/")
+
+plots_folder <- file.path(harddrive,
+                          "test/GO/plots")
+
+charts_folder <- file.path(analysis_folder,
+                          "test/GO/charts")
+
+dir.create(charts_folder,recursive = TRUE)
+dir.create(plots_folder,recursive = TRUE)
+
+GO_save_folder <- file.path(analysis_folder,
+                          "GO/saves/")
+
+pathway_save_folder <- file.path(analysis_folder,
+                          "Pathway/saves/")
+
+# Which ontology: choose between all, biological process (bp), 
+# molecular function (mf) and cellular component (cc).
+ont <- "bp"
+
+# P-adjust cutoff. Adjustment method is benjamini-hochberg (FDR)
+p.cutoff <- 0.05
+
+# The number of GO terms to compare per cluster
+topN  <- 5
+
+# Count cutoff. The low end filtering of counts
+count.cutoff <- 10
+
+# Heatmap coloring options
+pos_color_low <- "#fff5f0"
+pos_color_high <- "#E41A1C" # The color to which the significant p-values converge
+
+neg_color_low <- "#F7FBFF"
+neg_color_high <- "#377EB8"
+
+# One of GO, KEGG, Reactome or all
+# if you choose all, you need to loop through them manually 
+# See lines 160/161 for this
+comparison <- "GO"
+
+#analysis name for plot names
+NAME <- "GO_trunc"
+```
+
+# Load previous results
+```{r}
+down_compare_GO <- readRDS(file.path(GO_save_folder,
+                                     "down_compare_GO.Rds"))
+down_compare_kegg <- readRDS(file.path(GO_save_folder,
+                                       "down_compare_kegg.Rds"))
+down_compare_reactome <- readRDS(file.path(GO_save_folder,
+                                       "down_compare_reactome.Rds"))
+
+up_compare_GO <- readRDS(file.path(GO_save_folder,
+                                   "up_compare_GO.Rds"))
+up_compare_kegg <- readRDS(file.path(GO_save_folder,
+                                       "up_compare_kegg.Rds"))
+up_compare_reactome <- readRDS(file.path(GO_save_folder,
+                                       "up_compare_reactome.Rds"))
+```
+
+# Get significant genes
+```{r}
+dir.create(GO_save_folder,recursive = TRUE)
+dir.create(pathway_save_folder,recursive = TRUE)
+
+res_up <- lapply(results.list_filter,function(df){
+  sigsdf_up <- df[(df$log2FoldChange >= 1) & (df$padj <= 0.05),]
+  upgene <- (sigsdf_up$symbol)
+  return(upgene)
+})
+
+res_down <- lapply(results.list_filter,function(df){
+  sigsdf_down <- df[(df$log2FoldChange <= - 1) & (df$padj <= 0.05),]
+  downgene <- (sigsdf_down$symbol)
+  return(downgene)
+})
+
+up_entrez <- lapply(res_up,function(upgene){
+  gene_e <- bitr(upgene, fromType="SYMBOL", toType = "ENTREZID", 
+                    OrgDb = "org.Mm.eg.db")
+  return(gene_e[["ENTREZID"]])
+})
+
+down_entrez <- lapply(res_down,function(downgene){
+  gene_e <- bitr(downgene, fromType = "SYMBOL", toType = "ENTREZID", 
+                    OrgDb = "org.Mm.eg.db")
+  return(gene_e[["ENTREZID"]])
+})
+```
+
+# Calculate GO/Pathways and compare cluster
+```{r}
+if(comparison == "GO"| comparison == "all"){
+  up_compare_GO <- compareCluster(res_up,
+                             fun = enrichGO,
+                             OrgDb = "org.Mm.eg.db",
+                             keyType = "SYMBOL",
+                             ont = ont,
+                             pAdjustMethod = "BH",
+                             pvalueCutoff  = p.cutoff,
+                             readable = TRUE
+                             )
+  
+  write.csv(as.data.frame(up_compare_GO),
+            file = file.path(charts_folder,
+                             "up_compare_GO.csv"),
+            row.names = FALSE)
+  up_compare <- up_compare_GO
+}
+
+if(comparison == "Reactome"| comparison == "all"){
+  up_compare_reactome <- compareCluster(up_entrez,
+                             fun = enrichPathway,
+                             organism = "mouse",
+                             pAdjustMethod = "BH",
+                             pvalueCutoff  = p.cutoff,
+                             readable = TRUE
+                             )
+  
+  write.csv(as.data.frame(up_compare_reactome),
+            file = file.path(charts_folder,
+                             "up_compare_reactome.csv"),
+            row.names = FALSE)
+  up_compare <- up_compare_reactome
+}
+
+if(comparison == "KEGG"| comparison == "all"){
+  up_compare_KEGG <- compareCluster(up_entrez,
+                             fun = enrichKEGG,
+                             organism = "mmu",
+                             pAdjustMethod = "BH",
+                             pvalueCutoff  = p.cutoff,
+                             )
+  
+    up_compare_KEGG <- setReadable(up_compare_KEGG, 
+                                   "org.Mm.eg.db",
+                                   keyType = "ENTREZID")
+    
+    up_compare_KEGG@compareClusterResult$Description <- gsub(
+      " - Mus musculus \\(house mouse)","",
+      up_compare_KEGG@compareClusterResult$Description)
+    
+  write.csv(as.data.frame(up_compare_KEGG),
+            file = file.path(charts_folder,
+                             "up_compare_Kegg.csv"),
+            row.names = FALSE)
+  up_compare <- up_compare_KEGG
+}
+```
+
+```{r}
+if(comparison == "GO"| comparison == "all"){
+  down_compare_GO <- compareCluster(res_down,
+                             fun = enrichGO,
+                             OrgDb = "org.Mm.eg.db",
+                             keyType = "SYMBOL",
+                             ont = ont,
+                             pAdjustMethod = "BH",
+                             pvalueCutoff  = p.cutoff,
+                             readable = TRUE
+                             )
+    write.csv(as.data.frame(down_compare_GO),
+            file = file.path(charts_folder,
+                             "down_compare_GO.csv"),
+            row.names = FALSE)
+  down_compare <- down_compare_GO
+}
+
+if(comparison == "Reactome"| comparison == "all"){
+  down_compare_reactome <- compareCluster(down_entrez,
+                             fun = enrichPathway,
+                             organism = "mouse",
+                             pAdjustMethod = "BH",
+                             pvalueCutoff  = p.cutoff,
+                             readable = TRUE
+                             )
+     write.csv(as.data.frame(down_compare_reactome),
+            file = file.path(charts_folder,
+                             "down_compare_reactome.csv"),
+            row.names = FALSE)
+  down_compare <- down_compare_reactome
+}
+
+if(comparison == "KEGG"| comparison == "all"){
+  down_compare_KEGG <- compareCluster(down_entrez,
+                             fun = enrichKEGG,
+                             organism = "mmu",
+                             pAdjustMethod = "BH",
+                             pvalueCutoff  = p.cutoff,
+                             )
+  
+  down_compare_KEGG <- setReadable(down_compare_KEGG, 
+                                   "org.Mm.eg.db",
+                                   keyType = "ENTREZID")
+  
+  down_compare_KEGG@compareClusterResult$Description <- gsub(
+    " - Mus musculus \\(house mouse)","",
+    down_compare_KEGG@compareClusterResult$Description)
+  
+  write.csv(as.data.frame(down_compare_KEGG),
+            file = file.path(charts_folder,
+                             "down_compare_Kegg.csv"),
+            row.names = FALSE)
+  down_compare <- down_compare_KEGG
+}
+```
+
+# Save results
+```{r}
+saveRDS(down_compare_GO,
+        file.path(GO_save_folder,"down_compare_GO.Rds"))
+saveRDS(down_compare_KEGG,
+        file.path(pathway_save_folder,"down_compare_kegg.Rds"))
+saveRDS(down_compare_reactome,
+        file.path(pathway_save_folder,"down_compare_reactome.Rds"))
+
+saveRDS(up_compare_GO,
+        file.path(GO_save_folder,"up_compare_GO.Rds"))
+saveRDS(up_compare_KEGG,
+        file.path(pathway_save_folder,"up_compare_kegg.Rds"))
+saveRDS(up_compare_reactome,
+        file.path(pathway_save_folder,"up_compare_reactome.Rds"))
+```
+
+# Calculations
+```{r}
+# if you choose all, you need to loop through them manually
+up_compare <- up_compare_GO
+down_compare <- down_compare_GO
+
+# Filter and arrange by p-value
+up_compare_filter <- filter(up_compare,
+                            Count > count.cutoff) %>% arrange(p.adjust)
+
+# -log of adjusted p.value
+up_compare_filter@compareClusterResult$p.adjust <- 
+  -log10(up_compare_filter@compareClusterResult$p.adjust)
+
+# Filter and arrange by p.value
+down_compare_filter <- filter(down_compare,
+                              Count > count.cutoff) %>% arrange(p.adjust)
+
+# -log of p.value
+down_compare_filter@compareClusterResult$p.adjust <- -log10(
+  down_compare_filter@compareClusterResult$p.adjust )
+```
+
+# Maximal and minimal p-values for scales
+```{r}
+max_p <- max(down_compare_filter@compareClusterResult$p.adjust,
+                     up_compare_filter@compareClusterResult$p.adjust)
+
+if(max_p > 30){max_p <- 30}
+```
+
+# Fortify data.frames for plotting (topN)
+```{r}
+# Make data frames for plotting. Only use topN terms per Cluster
+df_up <- fortify(up_compare_filter, 
+                         showCategory = topN, split = NULL)
+df_up <- droplevels(df_up)
+
+df_down <- fortify(down_compare_filter, 
+                           showCategory = topN, split = NULL)
+df_down <- droplevels(df_down)
+
+x_labels_up <- gsub("\n"," ",levels(df_up$Cluster))
+x_labels_down <- gsub("\n"," ",levels(df_down$Cluster))
+
+levels(df_up$Cluster) <- x_labels_up
+levels(df_down$Cluster) <- x_labels_down
+```
+
+# Clustering
+```{r}
+clust_met <- "complete"
+
+markers.down <- df_down$Description %>% unique()
+markers.up <- df_up$Description %>% unique()
+
+p.mat.down <- df_down %>% 
+  filter(Description %in% markers.down) %>% 
+  dplyr::select(Description,Cluster,p.adjust) %>%
+  pivot_wider(names_from = Cluster,values_from = p.adjust) %>%
+  data.frame() # make df
+row.names(p.mat.down) <- p.mat.down$Description  # put gene in `row`
+p.mat.down <- p.mat.down[,-1] #drop gene column as now in rows
+p.mat.down[is.na(p.mat.down)] <- 0
+
+# hclust with distance matrix
+clust.down <- hclust(dist(p.mat.down %>% as.matrix()),method = clust_met) 
+
+p.mat.up <- df_up %>% 
+  filter(Description %in% markers.up) %>% 
+  dplyr::select(Description,Cluster,p.adjust) %>%
+  pivot_wider(names_from = Cluster,values_from = p.adjust) %>%
+  data.frame() # make df as tibbles -> matrix annoying
+row.names(p.mat.up) <- p.mat.up$Description  # put gene in `row`
+p.mat.up <- p.mat.up[,-1] #drop gene column as now in rows
+p.mat.up[is.na(p.mat.up)] <- 0
+
+# hclust with distance matrix
+clust.up <- hclust(dist(p.mat.up %>% as.matrix()),method = clust_met) 
+```
+
+# Plotting
+```{r}
+theme.dp <- list(
+  geom_point(),
+  theme_dose(5),
+  #coord_fixed(ratio = 1.4),
+  scale_color_gradient(low = pos_color_low,
+                       high = pos_color_high,
+                       limits = c(0,max_p)), #adjust limits
+  ylab(NULL),
+
+  theme(
+    axis.title = element_blank(),
+    axis.text.x = element_text(angle = 90,
+                               hjust = 1,
+                               vjust = .5),
+        legend.text = element_text(size = 5),
+        legend.position = "inside",
+        legend.position.inside =  c(2.7,-0.1), # GO
+        #legend.position = c(3,-0.1), # kegg
+        #legend.position = c(2.5,-0.1), # reactome
+        legend.direction = "horizontal",
+        legend.box = "vertical",
+        legend.spacing.x = unit(0.05, 'cm'),
+        legend.title = element_text(size = 5),
+        panel.background = element_rect(fill='transparent'), #transparent panel bg
+    plot.background = element_rect(fill='transparent', color=NA), #transparent plot bg
+   # panel.grid.major = element_blank(), #remove major gridlines
+   # panel.grid.minor = element_blank(), #remove minor gridlines
+    legend.background = element_rect(fill='transparent'), #transparent legend bg
+    legend.box.background = element_blank(), #transparent legend panel
+   axis.ticks = element_blank()
+  ),
+  labs(color = "-log10 (p.adjust)"),
+  guides(size = guide_legend(order = 2),
+         color = guide_colorbar(order = 1,
+                                title.theme =
+                                  element_text(
+                                    margin = margin(-15, 0, 0, 0, "pt"))
+                                )
+         )
+)
+
+# GO + Pathway Up
+df_up_rc <- df_up
+
+df_up_rc$Description <- fct_relevel(df_up_rc$Description,
+                                rev(clust.up$labels[clust.up$order]))
+
+df_up_rc$Description_trunc <- sapply(df_up_rc$Description, 
+                                     truncate_go_term, 
+                                     max_length = 30)
+
+df_up_rc$ID_desc <- paste(df_up_rc$ID,df_up_rc$Description_trunc)
+
+df_up_rc <- df_up_rc %>%
+  mutate(p.adjust = ifelse(p.adjust > max_p, max_p, p.adjust))
+
+df_up_rc <- mutate(df_up_rc, 
+                     FoldEnrichment = GeneRatio / parse_ratio(BgRatio))
+
+df_up_rc <- 
+  mutate(df_up_rc,
+    ClusterGenes = as.numeric(gsub(".*\\((\\d+)\\).*", "\\1", Cluster)),
+    Norm_GR = GeneRatio / ClusterGenes
+  )
+
+# GO + Pathway Down
+df_down_rc <- df_down
+
+df_down_rc$Description <- fct_relevel(df_down$Description,
+                                rev(clust.down$labels[clust.down$order]))
+
+df_down_rc$Description_trunc <- sapply(df_down_rc$Description,
+                                       truncate_go_term,max_length = 30)
+
+df_down_rc$ID_desc <- paste(df_down_rc$ID,df_down_rc$Description_trunc)
+
+df_down_rc <- df_down_rc %>%
+  mutate(p.adjust = ifelse(p.adjust > max_p, max_p, p.adjust))
+
+df_down_rc <- mutate(df_down_rc, 
+                     FoldEnrichment = GeneRatio / parse_ratio(BgRatio))
+
+df_down_rc <- mutate(df_down_rc,
+    ClusterGenes = as.numeric(gsub(".*\\((\\d+)\\).*", "\\1", Cluster)),
+    Norm_GR = GeneRatio / ClusterGenes
+  )
+```
+
+
+```{r}
+dp_up_FE <- ggplot(df_up_rc, aes(x = Cluster, 
+                                 y = ID_desc, 
+                                 size = FoldEnrichment, 
+                                 color = p.adjust, 
+                                 stroke = NA)
+                   ) +
+  theme.dp + scale_y_discrete(position = "right")
+
+dp_down_FE <- ggplot(df_down_rc, aes(x = Cluster,
+                                     y = ID_desc, 
+                                     size = FoldEnrichment,
+                                     color = p.adjust,
+                                     stroke = NA)
+                     ) +
+  theme.dp + scale_y_discrete(position = "right") +
+  scale_color_gradient(low = neg_color_low,
+                       high = neg_color_high,
+                       limits = c(0,max_p))
+```
+
+
+```{r}
+dp_up_NGR <- ggplot(df_up_rc, aes(x = Cluster, y = ID_desc, 
+                               size = Norm_GR, color = p.adjust, stroke = NA)) +
+  theme.dp + scale_y_discrete(position = "right") +
+  ggtitle(glue("Size according to GeneRatio/Count"))
+
+dp_down_NGR <- ggplot(df_down_rc, aes(x = Cluster, y = ID_desc, 
+                                     size = Norm_GR, color = p.adjust, stroke = NA)) +
+  theme.dp + scale_y_discrete(position = "right") +
+  scale_color_gradient(low = neg_color_low,
+                       high = neg_color_high,
+                       limits = c(0,max_p)) +
+  ggtitle(glue("Size according to GeneRatio/Count"))
+
+dp_up_count <- ggplot(df_up_rc, aes(x = Cluster, y = ID_desc, 
+                               size = Count, color = p.adjust)) +
+  theme.dp + scale_y_discrete(position = "right") +
+  ggtitle(glue("Size according to Count"))
+
+dp_down_count <- ggplot(df_down_rc, aes(x = Cluster, y = ID_desc, 
+                                     size = Count, color = p.adjust)) +
+  theme.dp + scale_y_discrete(position = "right") +
+  scale_color_gradient(low = neg_color_low,
+                       high = neg_color_high,
+                       limits = c(0,max_p)) +
+  ggtitle(glue("Size according to Count"))
+
+```
+
+# Saving
+
+## Save Plots
+```{r}
+save_ggplot_formats(
+  plt = dp_up_FE,
+  create_plot_subdir = TRUE,
+  base_plot_dir = plots_folder,
+  plt_name = glue("{NAME}_dotplot_up_rc_foldenrichment_v2"),
+  width = 2.5,height = 5
+  )
+
+save_ggplot_formats(
+  plt = dp_down_FE,
+  create_plot_subdir = TRUE,
+  base_plot_dir = plots_folder,
+  plt_name = glue("{NAME}_dotplot_down_rc_foldenrichment_v2"),
+  width = 2.5,height = 5
+  )
+```
+
+
+```{r}
+save_ggplot_formats(
+  plt = dp_up_NGR,
+  create_plot_subdir = TRUE,
+  base_plot_dir = plots_folder,
+  plt_name = glue("{NAME}_dotplot_up_rc_NGR"),
+  width = 5,height = 8
+  )
+
+save_ggplot_formats(
+  plt = dp_down_NGR,
+  create_plot_subdir = TRUE,
+  base_plot_dir = plots_folder,
+  plt_name = glue("{NAME}_dotplot_down_rc_NGR"),
+  width = 5,height = 8
+  )
+
+save_ggplot_formats(
+  plt = dp_up_count,
+  create_plot_subdir = TRUE,
+  base_plot_dir = plots_folder,
+  plt_name = glue("{NAME}_dotplot_up_rc_count"),
+  width = 5,height = 8
+  )
+
+save_ggplot_formats(
+  plt = dp_down_count,
+  create_plot_subdir = TRUE,
+  base_plot_dir = plots_folder,
+  plt_name = glue("{NAME}_dotplot_down_rc_count"),
+  width = 5,height = 8
+  )
+```
+
+## Save Tables
+```{r}
+write.csv(as.data.frame(df_down_rc),
+            file = file.path(charts_folder,
+                             glue("down_compare_filter_{NAME}.csv")),
+            row.names = FALSE)
+
+write.csv(as.data.frame(df_up_rc),
+            file = file.path(charts_folder,
+                             glue("up_compare_filter_{NAME}.csv")),
+            row.names = FALSE)
+```
+

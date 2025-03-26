@@ -1,0 +1,541 @@
+---
+title: "DE_GO_RNA_seq_promedi"
+author: "Johannes Schöneich"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r}
+library(EnhancedVolcano)
+library(tidyverse)
+library(DESeq2)
+library(limma)
+library(glue)
+library(clusterProfiler)
+library(DOSE)
+library(enrichplot)
+library(patchwork)
+library(cowplot)
+library(openxlsx)
+
+harddrive <- "E:"
+source(file.path(harddrive,"helper_functions.R"))
+source(file.path(harddrive,"/DE_analysis/DE_helperfunctions.R"))
+```
+
+```{r}
+dds_fullsample <- readRDS(file.path(harddrive,
+                                    "RNA_seq/RNAseq_promedi/dds_LRT_group_RNAseq_promedi.Rds"))
+
+#condition to analyse: e.g. timepoint, condition
+condition <- "group"
+
+analysis_folder <- glue("DE_analysis/DE_LRT_promedi_{condition}")
+
+plots_folder <- file.path(harddrive,analysis_folder,"DE/plots")
+charts_folder <- file.path(harddrive,analysis_folder,"DE/charts")
+
+if (!dir.exists(analysis_folder)){
+  dir.create(analysis_folder,recursive = TRUE)
+  dir.create(plots_folder,recursive = TRUE)
+  dir.create(charts_folder,recursive = TRUE)
+}
+
+#optional: read in the results.list if this analysis was already run and you want to change plots
+
+results.list_switched <- readRDS(file.path(harddrive,analysis_folder,
+                                  glue("DE_results.list_{condition}_switched.Rds")))
+
+results.list <- readRDS(file.path(harddrive,analysis_folder,
+                                  glue("DE_results.list_{condition}.Rds")))
+
+```
+
+## Volcano Plots DE genes
+
+The contrast order is always +logFC then -logFC 
+(first numerator (Zähler) then Denominator (Nenner))
+condition treated vs untreated, tells you that the estimates are of the 
+logarithmic fold change log2(treated/untreated).
+
+The level given last is the base level for the comparison. The syntax is:
+contrast <- c("condition", "level_to_compare", "base_level")
+for example, if we observe a log2 fold change of -2 this would mean the gene expression is lower 
+in the level of interest relative to the base level
+
+```{r, warning = FALSE}
+#every pairwise combination of timepoints
+combination <- combn(levels(colData(dds_fullsample)[,condition]), 2)
+#catch the error if underscore is used in the name
+#combination <- gsub("_","-",combination)
+
+combination_switch <- combination[c(2,1),] # make it so that prox is always left
+#careful. This works for pro vs med vs dis same age, but screws up intra location
+
+#in the case of prWe/poWe we want the early timepoints to be in front
+#levels.sort <- sort(levels(colData(dds_fullsample)[,condition]),decreasing = T)
+#combination <- combn(levels.sort,2)
+
+list.names <- capture.output(apply(combination_switch,2,
+                                   function(x){cat(x,sep = "_",fill = T)}))
+list.names <- list.names[which(list.names!="NULL")]
+
+if(!exists("results.list")){
+  #make an empty list with all combinations
+  results.list <- sapply(list.names,function(x) NULL)
+
+for(i in 1:length(results.list)){
+  print(i)
+  #paste("working on", list.names[i])
+  results.list[[i]] <- results(dds_fullsample, 
+                               contrast = c(condition, 
+                                            combination_switch[1,i],
+                                            combination_switch[2,i]),
+                               cooksCutoff = TRUE,
+                               independentFiltering = TRUE, 
+                               alpha = 0.05, 
+                               pAdjustMethod = "BH"
+                               )
+
+  results.list[[i]] <- lfcShrink(dds_fullsample, 
+                                 contrast = c(condition, 
+                                              combination_switch[1,i], 
+                                              combination_switch[2,i]),
+                                 res = results.list[[i]],
+                                 type = "ashr")
+}
+
+results.list <- lapply(results.list,function(x){x$symbol <- rownames(x);return(x)})
+sapply(results.list,function(x){sum(is.na(x))}) #are there any NAs left?
+results.list <- lapply(results.list,function(x){na.omit(x)})
+
+#change logfc so that early is to the left.
+results.list <- lapply(results.list,
+                       function(res){
+                         res$log2FoldChange <- -res$log2FoldChange
+                         return(res)
+                         }
+                       )
+
+saveRDS(results.list,file = file.path(harddrive,
+                                      analysis_folder,
+                                      glue("DE_results.list_",
+                                           "{condition}_switched.Rds")))
+}
+```
+
+```{r}
+# Define the timepoints and categories
+timepoints <- c("d01", "d05", "d10", "d25")
+categories <- c("pro", "med", "dis")
+
+# Generate all pairwise comparisons
+all_comparisons <- unlist(
+  lapply(timepoints, function(tp) {
+    paste0(tp, ".", categories[-length(categories)], "_", tp, ".", categories[-1])
+  })
+)
+
+# Print the result
+print(all_comparisons)
+```
+
+
+```{r}
+#for the version with pro in the front comparison
+generate_volcano_plots(results_list = results.list_switched,
+                       pos_color = "#E41A1C",
+                       neg_color = "#377EB8",
+                       plots_folder = plots_folder,
+                       charts_folder = charts_folder,
+                       filename_prefix = "promedi_paper_v5",
+                       save = TRUE,
+                       subset_condition = all_comparisons
+                       )
+```
+
+```{r}
+# promedi intra
+# Define the timepoints
+timepoints <- c("d01", "d05", "d10", "d25")
+
+# Define the conditions
+conditions <- c("pro", "med", "dis")
+
+# Generate reversed-order vectors for each condition
+pro_vector <- paste0(timepoints[-length(timepoints)], ".pro_",
+                     timepoints[-1], ".pro")
+med_vector <- paste0(timepoints[-length(timepoints)], ".med_",
+                     timepoints[-1], ".med")
+dis_vector <- paste0(timepoints[-length(timepoints)], ".dis_", 
+                     timepoints[-1], ".dis")
+```
+
+```{r}
+generate_volcano_plots(results_list = results.list,
+                       pos_color = "#E41A1C",
+                       neg_color = "#377EB8",
+                       plots_folder = plots_folder,
+                       charts_folder = charts_folder,
+                       filename_prefix = "promedi_pro_intra",
+                       save = TRUE,
+                       subset_condition = pro_vector
+                       )
+
+generate_volcano_plots(results_list = results.list,
+                       pos_color = "#E41A1C",
+                       neg_color = "#377EB8",
+                       plots_folder = plots_folder,
+                       charts_folder = charts_folder,
+                       filename_prefix = "promedi_med_intra",
+                       save = TRUE,
+                       subset_condition = med_vector
+                       )
+
+generate_volcano_plots(results_list = results.list,
+                       pos_color = "#E41A1C",
+                       neg_color = "#377EB8",
+                       plots_folder = plots_folder,
+                       charts_folder = charts_folder,
+                       filename_prefix = "promedi_dis_intra",
+                       save = TRUE,
+                       subset_condition = dis_vector
+                       )
+```
+
+```{r fig.height =  10, fig.width =  10}
+pos_color <- "#E41A1C"
+neg_color <- "#377EB8"
+
+quantile_values <- sapply(results.list,function(x){
+  quantile(x$log2FoldChange,c(0.001,0.999))}
+  )
+
+xmin <- min(quantile_values) + 1
+xmax <- max(quantile_values) - 1
+
+p.cutoff <- min(sapply(results.list,function(x){
+  quantile(x[x$padj >0,]$padj,0.001)}))
+
+for(i in 1:length(results.list)){
+  res <- results.list[[i]]
+  res.new <- as.data.frame(res)
+  
+  #extract the names from the results.list
+  dayneg <- strsplit2(names(results.list[i]),split = "_")[1]
+  daypos <- strsplit2(names(results.list[i]),split = "_")[2]
+  
+  # identify genes that pass the threshold
+  up <- rownames(subset(res, log2FoldChange >= xmax))
+  down <- rownames(subset(res, log2FoldChange <= xmin))
+  p.up <- rownames(subset(res, padj <= p.cutoff))
+  
+  # change log2FCs in the object to be max or min cutoff 
+  res.new$log2FoldChange <- ifelse(res.new$log2FoldChange >= xmax, xmax,
+                                   ifelse(res.new$log2FoldChange <= xmin, xmin,
+                                          res.new$log2FoldChange))
+  # also change p.adj accordingly
+  res.new$padj <- ifelse(res.new$padj <= p.cutoff, p.cutoff, res.new$padj)
+
+  #top 20
+  top20 <- res.new %>% top_n(20,log2FoldChange) %>% arrange(-log2FoldChange)
+  
+  #bot 20
+  bot20 <- res.new %>% slice_min(log2FoldChange,n = 20) %>% arrange(-log2FoldChange)
+  
+  #Only those which are significant
+  top20 <- subset(top20, subset = padj < 0.05 & log2FoldChange > 1) 
+  bot20 <- subset(bot20, subset = padj < 0.05 & log2FoldChange < - 1)
+    
+  # custom shapes for the points
+  customshape <- rep(19, nrow(res.new))
+  names(customshape) <- rep('normal', nrow(res.new))
+  customshape[which(rownames(res.new) %in% up)] <- -9658 #shape of the arrow facing right
+  names(customshape)[which(rownames(res.new) %in% up)] <- '> LFC'
+  customshape[which(rownames(res.new) %in% p.up)] <- 17 #shape of the arrow facing up
+  names(customshape)[which(rownames(res.new) %in% p.up)] <- 'padj'
+  customshape[which(rownames(res.new) %in% down)] <- -9668 #shape of the arrow facing left
+  names(customshape)[which(rownames(res.new) %in% down)] <- '< LFC'
+  
+  # custom sizes for the points
+  customsize <- rep(2.0, nrow(res.new))
+  customsize [which(rownames(res.new) %in% up)] <- 4
+  customsize [which(rownames(res.new) %in% p.up)] <- 4
+  customsize [which(rownames(res.new) %in% down)] <- 4
+  
+  keyvals <- ifelse(
+    res.new$log2FoldChange <= -1 & res.new$padj <= 0.05, neg_color,
+    ifelse(res.new$log2FoldChange  >= 1 & res.new$padj <= 0.05, pos_color,
+           'grey'))
+  
+  keyvals[is.na(keyvals)] <- 'grey'
+  names(keyvals)[keyvals == neg_color] <- glue('up in {dayneg}')
+  names(keyvals)[keyvals == 'grey'] <- 'ns'
+  names(keyvals)[keyvals == pos_color] <- glue("up in {daypos}")
+
+  #data.frame is needed for dplyr filter to work
+  df <- as.data.frame(res[c("log2FoldChange","symbol","padj")]) %>% arrange(-log2FoldChange)
+
+  up_genes <- nrow(df %>% filter(log2FoldChange >= 1 & padj <= 0.05) )
+  down_genes <- nrow(df %>% filter(log2FoldChange <= -1 & padj <= 0.05))
+  
+  plt <- EnhancedVolcano(res.new,
+                         lab = res.new$symbol,
+                         x = 'log2FoldChange',
+                         y = 'padj',
+                         xlab = bquote(~Log[2]~'FoldChange'),
+                         ylab = bquote(~-Log[10]~'Padj'),
+                         #selectLab = c(bot20$symbol,top20$symbol),
+                         #drawConnectors = T,
+                         #arrowheads = F,
+                         max.overlaps = 0,
+                         colCustom = keyvals,
+                         pCutoff = 0.05,
+                         FCcutoff = 1.0,
+                         title = glue("DE genes {dayneg} vs. {daypos}"),
+                         boxedLabels = FALSE,
+                         colAlpha = 0.5,
+                         labSize = 7,
+                         axisLabSize = 35,
+                         titleLabSize = 28,
+                         subtitleLabSize = 24,
+                         captionLabSize = 24,
+                         legendLabSize = 24,
+                         shapeCustom = customshape,
+                         pointSize = customsize,
+                         subtitle = 
+                           glue("{dayneg}:{down_genes} {daypos}:{up_genes}"),
+                         caption = paste0("total = ", nrow(res), " genes"),
+                         xlim = c(xmin,xmax)
+  )
+  
+  save_ggplot_formats(
+    plt = plt,
+    base_plot_dir = plots_folder,
+    plt_name=glue("Volcano_{dayneg}_vs_{daypos}_quantile_cutoff_{condition}"),
+    width = 14, height = 14
+  )
+  
+df2 <- df %>% filter(log2FoldChange >= 1 & padj <= 0.05 | log2FoldChange <= -1 & padj <= 0.05)
+write.csv(df2,file = file.path(charts_folder,
+                                glue("DE_{dayneg}_vs_{daypos}_{condition}.csv")),
+          row.names = F)
+}
+
+```
+
+# GO Terms with clusterProfiler
+
+```{r}
+# which ontology: choose between all, biological process (bp), molecular function (mf) 
+# and cellular component (cc).
+ont <- "bp"
+
+#p-adjust cutoff. Adjustment method is benjamini hochberg (false discovery rate)
+pcutoff <- 0.05
+
+go_plots_folder <- file.path(analysis_folder,"GO/plots")
+go_charts_folder <- file.path(analysis_folder,"GO/charts")
+
+if (!dir.exists(go_plots_folder)){
+dir.create(go_plots_folder,recursive = T)
+dir.create(go_charts_folder,recursive = T)
+}
+```
+
+## GO analysis for upregulated Genes (positive values)
+
+```{r}
+for(list.nmbr in 1:length(results.list)){
+  
+GO_NAME <- paste(names(results.list)[list.nmbr],ont,pcutoff,sep = "_")
+daypos <- strsplit2(names(results.list[list.nmbr]),split = "_")[2]
+
+print(paste("calculating",daypos,"for",GO_NAME))
+
+res <- results.list[[list.nmbr]]
+
+#UP Regulation Table
+sigsdf_UP <- res[res$log2FoldChange >= 1 & (res$padj <= 0.05),]
+
+print(paste("number of genes",nrow(sigsdf_UP)))
+
+UPgene <- sigsdf_UP$symbol
+GO_upReg_results <- enrichGO(gene          = UPgene,
+                             OrgDb         = "org.Mm.eg.db",
+                             keyType       = "SYMBOL",
+                             ont           = ont,
+                             pAdjustMethod = "BH",
+                             pvalueCutoff  = pcutoff,
+                             readable      = TRUE)
+
+  #arrange for p-value
+  GO_upReg_results@result <- arrange(GO_upReg_results@result,p.adjust)
+
+  GO_upReg_df <- as.data.frame(GO_upReg_results)
+
+  if(nrow(GO_upReg_df) == 0){
+    print(paste("No significant GO terms found for",GO_NAME))
+    next
+    }
+
+  write.csv(GO_upReg_df,file = file.path(go_charts_folder,
+                                     glue("GO_{daypos}_results_{GO_NAME}_{condition}.csv")),
+            row.names = F)
+  
+  if(nrow(GO_upReg_df) < 30){
+    label_length = nrow(GO_upReg_df)
+    } else{label_length = 30}
+  
+  labels <- str_wrap(rev(GO_upReg_df$Description[1:label_length]),width = 40)
+  #dotplot colored by p-value and sorted reverse
+  GO_upReg_Dotplot_pvalue <- dotplot.enrichResult2(GO_upReg_results,showCategory = label_length, 
+                                                   x = "p.adjust", title = GO_NAME,
+                                                   color = "GeneRatio",font.size = 14) +
+    scale_x_reverse() + #labels = scaleFUN
+    scale_y_discrete(limits = rev(GO_upReg_df$Description[1:label_length]),labels = labels) + 
+    ggtitle(glue("GO_{daypos}_dotplot_{GO_NAME}")) + 
+    theme(legend.text = element_text(size = 16),legend.title = element_text(size=16),
+          axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1))
+  
+  save_ggplot_formats(
+    plt = GO_upReg_Dotplot_pvalue,
+    create_plot_subdir = T,
+    base_plot_dir = go_plots_folder,
+    plt_name = glue("GO_{daypos}_Dotplot_pvalue_{GO_NAME}_{condition}"),
+    width = 8, height = 12
+  )
+
+  #netplot
+  GO_upReg_Cnetplot <- cnetplot(GO_upReg_results, 
+                                 showCategory = 10,max.overlaps = Inf) +
+    ggtitle(glue("GO_{daypos}_Cnetplot_{GO_NAME}_{condition}")) +
+    theme(plot.title = element_text(hjust =  0.5,face = "bold",size = 14))
+
+  save_ggplot_formats(
+    plt = GO_upReg_Cnetplot,
+    create_plot_subdir = T,
+    base_plot_dir = go_plots_folder,
+    plt_name=glue("GO_{daypos}_Cnetplot_{GO_NAME}_{condition}"),
+    width = 12, height = 10
+  )
+  
+  if(nrow(GO_upReg_df) < 5){
+    print(paste("Not enough significant GO terms found for treeplot of",GO_NAME))
+    next
+  }
+  #treeplot
+  edox2 <- pairwise_termsim(GO_upReg_results)
+  GO_upReg_enrichtreeplot <- treeplot(edox2, showCategory = label_length) + 
+    ggtitle(glue("GO_{daypos}_enrichtreeplot_{GO_NAME}_{condition}")) + 
+    theme(plot.title = element_text(hjust =  0.5,face = "bold",size = 14))
+  
+  save_ggplot_formats(
+    plt = GO_upReg_enrichtreeplot,
+    create_plot_subdir = T,
+    base_plot_dir = go_plots_folder,
+    plt_name = glue("GO_{daypos}_enrichtreeplot_{GO_NAME}_{condition}"),
+    width = 15, height = 10
+  )
+}
+```
+
+## GO analysis for DOWNregulated Genes (negative values)
+
+```{r}
+for(list.nmbr in 1:length(results.list)){
+  GO_NAME <- paste(names(results.list)[list.nmbr],ont,pcutoff,sep = "_")
+
+  dayneg <- strsplit2(names(results.list[list.nmbr]),split = "_")[1]
+  
+  print(paste("calculating",dayneg,"for",GO_NAME))
+  
+  res <- results.list[[list.nmbr]]
+  
+  #DOWN Regulation Table
+  sigsdf_DOWN <- res[(res$log2FoldChange <= -1) & (res$padj <= pcutoff),] 
+  
+  print(paste("number of genes",nrow(sigsdf_DOWN)))
+  DOWNgene <- (sigsdf_DOWN$symbol)
+  
+  GO_downReg_results <- enrichGO(gene = DOWNgene,
+                                OrgDb = "org.Mm.eg.db",
+                                keyType = "SYMBOL",
+                                ont = ont,
+                                pAdjustMethod = "BH",
+                                pvalueCutoff  = pcutoff,
+                                readable      = TRUE)
+
+  #arrange for p-value
+  GO_downReg_results@result<-arrange(GO_downReg_results@result,p.adjust)
+
+  GO_downReg_df <- as.data.frame(GO_downReg_results)  
+  
+  if(nrow(GO_downReg_df) == 0){
+    print(paste("No significant GO terms found for",GO_NAME))
+    next
+  }
+
+  write.csv(GO_downReg_df,file = file.path(go_charts_folder,
+              glue("GO_{dayneg}_results_{GO_NAME}_{condition}.csv"))
+            ,row.names = F)
+  
+  if(nrow(GO_downReg_df) < 30){
+    label_length = nrow(GO_downReg_df)
+    } else{label_length = 30}
+  
+  labels <- str_wrap(rev(GO_downReg_df$Description[1:label_length]),width = 40)
+  
+  #dotplot colored by p-value and sorted reverse
+  GO_downReg_Dotplot_pvalue <- dotplot.enrichResult2(GO_downReg_results,
+                                                     showCategory = label_length, 
+                                                    x = "p.adjust", title = GO_NAME,
+                          color = "GeneRatio",font.size = 14) + 
+    scale_x_reverse() + #labels=scaleFUN
+    scale_y_discrete(labels = labels, limits = rev(GO_downReg_df$Description[1:label_length])) +
+    ggtitle(glue("GO_{dayneg}_dotplot_{GO_NAME}")) + 
+    theme(legend.text = element_text(size = 16),legend.title = element_text(size=16),
+          axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1))
+  
+  
+  save_ggplot_formats(
+    plt = GO_downReg_Dotplot_pvalue,
+    create_plot_subdir = T,
+    base_plot_dir = go_plots_folder,
+    plt_name=glue("GO_{dayneg}_Dotplot_pvalue_{GO_NAME}_{condition}"),
+    width = 8, height = 12
+  )
+ 
+  #netplot
+  GO_downReg_Cnetplot <- cnetplot(GO_downReg_results,
+                                 showCategory = 10,max.overlaps = Inf) +
+    ggtitle(glue("GO_{dayneg}_Cnetplot_{GO_NAME}")) +
+    theme(plot.title = element_text(hjust =  0.5,face = "bold",size = 14))
+
+  save_ggplot_formats(
+    plt = GO_downReg_Cnetplot,
+    create_plot_subdir = T,
+    base_plot_dir = go_plots_folder,
+    plt_name=glue("GO_{dayneg}_Cnetplot_{GO_NAME}_{condition}"),
+    width = 12, height = 10
+  )
+
+  if(nrow(GO_downReg_df) < 5){
+    print(paste("Not enough significant GO terms found for treeplot of",GO_NAME))
+    next
+  }
+  #treeplot
+  edox2 <- pairwise_termsim(GO_downReg_results)
+  GO_downReg_enrichtreeplot <- treeplot(edox2) + 
+    ggtitle(glue("GO_{dayneg}_enrichtreeplot_{GO_NAME}_{condition}")) +
+    theme(plot.title = element_text(hjust =  0.5,face = "bold",size = 14))
+  
+  save_ggplot_formats(
+    plt = GO_downReg_enrichtreeplot,
+    create_plot_subdir = T,
+    base_plot_dir = go_plots_folder,
+    plt_name=glue("GO_{dayneg}_enrichtreeplot_{GO_NAME}_{condition}"),
+    width = 15, height = 10
+  )
+}
+```

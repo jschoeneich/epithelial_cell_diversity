@@ -1,0 +1,128 @@
+---
+title: "DE_GO_RNA_seq"
+author: "Johannes Schöneich"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+# Libraries 
+```{r}
+library(EnhancedVolcano)
+library(tidyverse)
+library(DESeq2)
+library(limma)
+library(glue)
+library(clusterProfiler)
+library(DOSE)
+library(enrichplot)
+library(cowplot)
+library(patchwork)
+
+harddrive <- "H:"
+source(file.path(harddrive,"/DE_analysis/DE_helperfunctions.R"))
+```
+# Input
+```{r}
+dds_fullsample <- readRDS(file.path(harddrive,
+          "RNA_seq/RNAseq_SPF_inf_GF/dds_LRT_group_RNAseq_SPF_inf_GF.Rds"))
+
+#condition to analyse: e.g. timepoint, condition
+condition <- "group"
+
+analysis_folder <- file.path(harddrive,"DE_analysis/DE_LRT_SPF_inf_GF")
+
+plots_folder <- file.path(harddrive,analysis_folder,"DE/plots")
+charts_folder <- file.path(harddrive,analysis_folder,"DE/charts")
+
+if (!dir.exists(analysis_folder)){
+  dir.create(analysis_folder,recursive = TRUE )
+  dir.create(plots_folder,recursive = TRUE )
+  dir.create(charts_folder,recursive = TRUE )
+}
+
+#optional: read in the results.list if this analysis was already run and you want to change plots
+results.list <- readRDS(file.path(analysis_folder,glue("DE_results.list_{condition}.Rds")))
+```
+
+# Volcano Plots DE genes
+
+The contrast order is always +logFC then -logFC 
+(first numerator (Zähler) then Denominator (Nenner))
+condition treated vs untreated, tells you that the estimates are of the 
+logarithmic fold change log2(treated/untreated).
+
+The level given last is the base level for the comparison. The syntax is:
+contrast <- c("condition", "level_to_compare", "base_level")
+for example, if we observe a log2 fold change of -2 this would mean the gene expression is lower 
+in the level of interest relative to the base level
+
+```{r, warning=FALSE}
+# every pairwise combination of timepoints
+combination <- combn(levels(colData(dds_fullsample)[,condition]), 2)
+list.names <- capture.output(apply(combination,2,function(x){cat(x,sep = "_",
+                                                                 fill = TRUE )}))
+list.names <- list.names[which(list.names!="NULL")]
+
+if(!exists("results.list")){
+  #make an empty list with all combinations
+  results.list <- sapply(list.names,function(x) NULL)
+  
+  for(i in 1:length(results.list)){
+    print(i)
+    #paste("working on", list.names[i])
+    results.list[[i]] <- results(dds_fullsample, 
+                                 contrast = c(condition, combination[1,i], 
+                                                            combination[2,i]),
+                                 cooksCutoff = TRUE, 
+                                 independentFiltering = TRUE, 
+                                 alpha = 0.05, 
+                                 pAdjustMethod = "BH"
+                                 )
+  
+    results.list[[i]] <- lfcShrink(dds_fullsample, contrast = c(condition,
+                                                                combination[1,i], 
+                                                              combination[2,i]), 
+                         res = results.list[[i]],
+                         type = "ashr")
+  }
+  
+  results.list <- lapply(results.list,function(x){x$symbol <- rownames(x);return(x)})
+  
+  #sapply(results.list,function(x){sum(is.na(x))}) #are there any NAs left?
+  
+  results.list <- lapply(results.list,function(x){na.omit(x)})
+  
+  #change logfc so that early is to the left.
+  results.list <- lapply(results.list,
+                         function(res){
+                           res$log2FoldChange <- -res$log2FoldChange
+                           return(res)
+                           }
+                         )
+
+  saveRDS(results.list,file = file.path(analysis_folder,glue("DE_results.list_{condition}.Rds")))
+}
+```
+
+```{r}
+GF_subsets <- c("d01.GF_d01.SPF","d05.GF_d05.SPF","d10.GF_d10.SPF")
+
+plot.list <- generate_volcano_plots(results_list = results.list[GF_subsets],
+                       pos_color = "#E41A1C",
+                       neg_color = "#377EB8",
+                       plots_folder = plots_folder,
+                       charts_folder = charts_folder,
+                       filename_prefix = "GF_top_bot20_connect",
+                       contribution.df
+                       )
+
+generate_volcano_plots(results_list = results.list[GF_subsets],
+                       pos_color = "#E41A1C",
+                       neg_color = "#377EB8",
+                       plots_folder = plots_folder,
+                       charts_folder = charts_folder,
+                       filename_prefix = "GF_top_bot20_connect",
+                       contribution.df,
+                       save = TRUE
+                       )
+```

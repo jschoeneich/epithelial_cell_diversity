@@ -1,0 +1,271 @@
+---
+title: "single_cell_manual_analysis"
+author: "Johannes Schöneich"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+# Load libraries
+```{r}
+library(Seurat)
+library(tidyverse)
+library(ggsci)
+library(Hmisc)
+library(archive)
+library(scales)
+library(gridExtra)
+library(glue)
+library(patchwork)
+```
+
+# Adjustments
+```{r}
+harddrive  <- "E:"
+
+source(file.path(harddrive,"DE_analysis/helper_functions.R"))
+source(file.path(harddrive,"scrna_datasets/single_cell_themes.R"))
+source(file.path(harddrive,"scrna_datasets/save_load_helper.R"))
+
+analysis_folder <- file.path(harddrive,
+                          "dl/scrna_full_2024_both_d25_ent_v2")
+
+cluster_use <- "int_0.3_broad"
+```
+
+```{r}
+scrna <- load_object(file.path(analysis_folder,
+                                            "/save/scrna_phase_clustering.Rds"))
+
+
+# scrna <- load_object(
+#   file.path(analysis_folder,"scrna_broad_tuft_uninf.Rds"))
+
+#scrna_inf <- load_object(
+#  file.path(analysis_folder,"scrna_broad_tuft_inf.Rds"))
+
+plots_folder <- file.path(analysis_folder,"analysis/plots")
+
+charts_folder <- file.path(analysis_folder,"analysis/charts/")
+```
+
+```{r}
+GO_save_folder <- file.path(analysis_folder,"saves/")
+
+pathway_save_folder <- file.path(analysis_folder,"Pathway/saves/")
+
+# Which ontology: choose between all, biological process (bp), 
+# molecular function (mf) and cellular component (cc).
+ont <- "bp"
+
+# P-adjust cutoff. Adjustment method is benjamini-hochberg (FDR)
+p.cutoff <- 0.05
+
+# The number of GO terms to compare
+topN  <- 10
+
+# Count cutoff. The low end filtering of counts
+count.cutoff <- 10
+
+# Heatmap coloring options
+pos_color_low <- "#fff5f0"
+pos_color_high <- "#E41A1C" # The color to which the significant p-values converge
+
+neg_color_low <- "#F7FBFF"
+neg_color_high <- "#377EB8"
+
+
+inf_cols <- c("#E08B00","#5BB300","#00C0AF","#7997FF","#FF61C9")
+uninf_cols  <- c("#E08B00","#5BB300","#7997FF","#FF61C9")
+```
+
+```{r}
+"Xist" %in% rownames(scrna) #if FALSE, its correct.
+
+DimPlot(scrna, reduction = "INTE_UMAP", 
+                group.by =  "integrated_snn_res.0.8",
+                label = TRUE)
+
+DimPlot(scrna, reduction = "INTE_UMAP", 
+                group.by =  "stage",
+                label = TRUE)
+```
+
+```{r}
+scrna$promedi <- scrna$integrated_snn_res.0.8
+
+#prWe pro is 7+4, prWe dis 8+6
+promedi.cluster.ids <- c(rep("prWe_med",3),"prWe_dis","prWe_med","prWe_pro","prWe_med",
+                         "prWe_dis","prWe_pro","prWe_dis","Scd2 high")
+
+levels(scrna$promedi) <- promedi.cluster.ids
+
+levels(scrna$promedi) <- c("Medial","Distal","Proximal", "Scd2 high")
+
+scrna$promedi <- factor(scrna$promedi,levels = c("Proximal","Medial","Distal","Scd2 high"))
+
+promedi_plot <- DimPlot(scrna, label = FALSE, reduction = "INTE_UMAP", group.by = "promedi", cols = c(hue_pal()(3),"darkgrey")) + mini_umap_theme + ggtitle(element_blank())
+
+seurat_plot <- DimPlot(scrna, label = FALSE, reduction = "INTE_UMAP", group.by = "seurat_clusters") + ggtitle(element_blank()) + mini_umap_theme
+```
+
+```{r}
+save_ggplot_formats(
+  plt = promedi_plot,
+  base_plot_dir = plots_folder,
+  plt_name = "scrna_promedi",
+  width = 10, height = 8
+)
+
+save_ggplot_formats(
+  plt = seurat_plot,
+  base_plot_dir = plots_folder,
+  plt_name = "scrna_ent_seurat",
+  width = 10, height = 8
+)
+```
+
+```{r, eval = FALSE}
+scrna_uninf <- scrna[,!scrna@meta.data$name == "d05i"]
+
+scrna_uninf$name <- as.factor(scrna_uninf$name)
+
+save_object(scrna,
+            file_name = file.path(analysis_folder,"scrna_inf_both_d25_ent.Rds"))
+
+save_object(scrna_uninf,
+            file_name = file.path(analysis_folder,"scrna_uninf_both_d25_ent.Rds"))
+```
+
+```{r}
+scrna_inf <- load_object(file.path(analysis_folder,"scrna_inf_both_d25_ent.Rds"))
+
+scrna <- load_object(file.path(analysis_folder,"scrna_uninf_both_d25_ent.Rds"))
+```
+
+```{r, fig.width= 30}
+Idents(scrna) <- "integrated_snn_res.0.8"
+p <- DimPlot(scrna, reduction = "INTE_UMAP",split.by = "integrated_snn_res.0.8")
+
+save_ggplot_formats(
+  plt = p,
+  base_plot_dir = plots_folder,
+  plt_name = "dimplot_0.8_split",
+  width = 24, height = 6
+)
+
+# Define a function to generate the plots
+generate_plot <- function(i, scrna) {
+  current_level <- levels(scrna$seurat_clusters)[i]
+  cols.highlight <- hue_pal()(length(levels(scrna$seurat_clusters)))[i]
+  DimPlot(scrna, 
+          label = FALSE, 
+          reduction = "INTE_UMAP", 
+          cells.highlight = WhichCells(scrna, idents = current_level),
+          cols.highlight = cols.highlight,
+          cols = "lightgrey",
+          sizes.highlight = 0.1) +
+    mini_umap_theme & NoLegend()
+} 
+
+# Generate a list of plots
+plot_list_sc <- lapply(seq_along(levels(scrna$seurat_clusters)), 
+                    generate_plot, scrna = scrna)
+
+my_grid <- wrap_plots(plot_list_sc)
+
+save_ggplot_formats(
+  plt = my_grid,
+  base_plot_dir = plots_folder,
+  plt_name = "grid_seurat",
+  width = 8, height = 16
+)
+
+```
+
+```{r}
+help_sort_func <- ifelse(
+  all.is.numeric(unique(scrna@meta.data[, cluster_use])),
+  function(x) as.numeric(as.character(x)),
+  as.character
+)
+
+scrna@meta.data[,cluster_use] <- help_sort_func(scrna@meta.data[,cluster_use])
+
+cluster_propotion = t(prop.table(x = table(scrna@meta.data[, cluster_use],
+                                                  scrna@meta.data$name),
+                                        margin = 2))
+
+cluster_propotion_sort = cluster_propotion[order(
+  cluster_propotion[,1],
+  cluster_propotion[,2],
+  decreasing = TRUE
+),]
+
+cp.df <- as.data.frame(cluster_propotion)
+colnames(cp.df) <- c("timepoint","cluster","proportion")
+
+# Create the stacked barplot using ggplot2
+barplot_stacked <- ggplot(cp.df, aes(x = timepoint, y = proportion, fill = cluster)) +
+  geom_bar(stat = "identity", position = "stack", colour = "black") +
+  geom_text(
+    aes(label = ifelse(proportion >= 0.02, sprintf("%.1f%%", proportion * 100), "")),
+    position = position_stack(vjust = 0.5), size = 5
+  ) + 
+  labs(x = NULL, y = NULL, title = NULL) +
+  #scale_fill_manual(values = uninf_cols) +  
+  theme_classic(base_size = 20) + 
+  theme(panel.border = element_blank(), panel.grid = element_blank(),
+        axis.text.x = element_text(vjust = 5), 
+        axis.line.x.bottom = element_blank(),
+        axis.ticks.x = element_blank()
+        )
+```
+
+```{r}
+tbl <- table(scrna@meta.data[, cluster_use],
+             scrna$name)
+rowsums <- rowSums(tbl)
+tbl <- cbind(tbl, rowsums)
+colsums <- colSums(tbl)
+tbl <- rbind(tbl, colsums)
+
+png(file.path(plots_folder,"png/table_proportions_enterocyte_swapped.png"), 
+    res = 200, width = 1100, height = 450)
+p <- tableGrob(tbl, theme = ttheme_default())
+grid.arrange(p)
+dev.off()
+
+save_ggplot_formats(
+  plt = barplot_stacked,
+  base_plot_dir = plots_folder,
+  plt_name = "barplot_proportion_enterocyte_swapped",
+  width = 10, height = 6
+)
+```
+
+```{r}
+Idents(scrna) <- "name"
+Idents(scrna_inf) <- "name"
+
+# Define a function to generate the plots
+generate_plot <- function(i, scrna, cols) {
+  current_level <- levels(scrna$name)[i]
+  cols.highlight <- cols[i]
+  DimPlot(scrna, 
+          label = FALSE, 
+          reduction = "INTE_UMAP", 
+          cells.highlight = WhichCells(scrna, idents = current_level),
+          cols.highlight = cols.highlight,
+          cols = "lightgrey",
+          sizes.highlight = 0.1) +
+    mini_umap_theme
+} 
+```
+
+```{r}
+#DE analysis
+
+
+
+```
+

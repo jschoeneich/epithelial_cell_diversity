@@ -1,0 +1,424 @@
+---
+title: "GO_promedi"
+author: "Johannes Schöneich"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE} 
+knitr::opts_chunk$set(warning = FALSE, message = FALSE) 
+```
+
+```{r}
+library(clusterProfiler)
+library(enrichplot)
+library(DOSE)
+library(tidyverse)
+library(glue)
+library(limma)
+library(stringi)
+library(ReactomePA)
+library(GOSemSim)
+```
+
+# Adjustments
+```{r}
+harddrive  <- "H:"
+
+source(file.path(harddrive,"DE_analysis/helper_functions.R"))
+
+analysis_folder <- file.path(harddrive,
+                          "DE_analysis/DE_LRT_promedi_group/")
+
+results.list <- readRDS(file.path(analysis_folder,
+                                  "DE_results.list_group.Rds"))
+
+plots_folder <- file.path(analysis_folder,"GO/plots")
+
+charts_folder <- file.path(analysis_folder,"GO/charts/")
+
+GO_save_folder <- file.path(analysis_folder,"GO/saves/")
+
+pathway_save_folder <- file.path(analysis_folder,"Pathway/saves/")
+
+if (!dir.exists(plots_folder)){
+  dir.create(plots_folder,recursive = TRUE)
+  dir.create(charts_folder,recursive = TRUE)
+  dir.create(GO_save_folder,recursive = TRUE)
+  dir.create(pathway_save_folder,recursive = TRUE)
+}
+
+# Which ontology: choose between all, biological process (bp), 
+# molecular function (mf) and cellular component (cc).
+ont <- "bp"
+
+# P-adjust cutoff. Adjustment method is benjamini-hochberg (FDR)
+p.cutoff <- 0.05
+
+# The number of GO terms to compare
+topN  <- 10
+
+# Count cutoff. The low end filtering of counts
+count.cutoff <- 10
+
+# Heatmap coloring options
+pos_color_low <- "#FFF5F0"
+pos_color_high <- "#E41A1C" # The color to which the significant p-values converge
+
+neg_color_low <- "#F7FBFF"
+neg_color_high <- "#377EB8"
+
+comparison <- "GO"
+
+NAME <- "GO_promedi"
+
+promedi.names <- c("d01.pro_d05.pro","d05.pro_d10.pro","d10.pro_d25.pro",
+                   "d01.med_d05.med","d05.med_d10.med","d10.med_d25.med",
+                   "d01.dis_d05.dis","d05.dis_d10.dis","d10.dis_d25.dis")
+
+results.list_filter <- results.list[names(results.list) %in% promedi.names]
+```
+
+```{r}
+add_missing_names <- function(df,missing_names,geneClusters, sort = TRUE){
+  require(glue)
+  if(!is_empty(missing_names)){
+  # a function that takes a fortified data.frame as input, the missing names
+  # from the analysis and the geneClusters from the GO output
+  missing_length <- sapply(geneClusters[
+    names(geneClusters) %in% missing_names],length)
+  
+  missing_names <- glue("{names(missing_length)} ({missing_length})")
+  
+  n_cols <- ncol(df)
+  
+  # Create a new data frame with the same number of columns as the df
+  new_rows <- data.frame(matrix(NA, nrow = length(missing_names), ncol = n_cols))
+  # Set the values from vector missing_names in the first column
+  new_rows[, 1] <- missing_names 
+  
+  # Rename the columns of new_rows to match your original data frame
+  colnames(new_rows) <- colnames(df)
+  new_rows$Description <- df$Description[1:length(missing_names)]
+  new_rows$ID <- df$ID[1:length(missing_names)]
+  
+  # Combine the new data frame with your existing data frame
+  df_new <- rbind(df, new_rows)
+} else {df_new <- df}
+  if(sort == TRUE){
+    df_new$Cluster <- fct_relevel(df_new$Cluster,c(
+      sort(grep("pro",levels(df_new$Cluster),value = TRUE)),
+      sort(grep("med",levels(df_new$Cluster),value = TRUE)),
+      sort(grep("dis",levels(df_new$Cluster),value = TRUE))
+    ))
+  }
+  return(df_new)
+}
+
+# Function to truncate a GO term to the last space before maximum length
+truncate_go_term <- function(term,max_length = 33) {
+    term <- as.character(term)
+    # Check if the term length is already within the limit
+    if (nchar(term) <= max_length) {
+      return(term)
+    } else {
+      # Find the last space before the maximum length
+      last_space <- max(gregexpr("\\s", substr(term, 1, max_length))[[1]])
+      truncated_term <- substr(term, 1, last_space - 1)
+      return(paste0(truncated_term, "[...]"))
+    }
+}
+
+res_promedi <- lapply(results.list_filter,function(df){
+  up_promedigene <- df$symbol
+  return(up_promedigene)
+})
+
+#res_promedi <- res_promedi[c(1,3,4,6)]
+
+promedi_entrez <- lapply(res_promedi,function(upgene){
+  gene_e <- bitr(upgene, fromType="SYMBOL", toType = "ENTREZID", 
+                    OrgDb =  "org.Mm.eg.db")
+  return(gene_e[["ENTREZID"]])
+})
+```
+
+# Calculate GO/Pathways and compare cluster
+```{r}
+
+GO_upReg_results <- enrichGO(gene          = res_promedi$preWe.pro_filter,
+                             OrgDb         = "org.Mm.eg.db",
+                             keyType       = "SYMBOL",
+                             ont           = ont,
+                             pAdjustMethod = "BH",
+                             pvalueCutoff  = p.cutoff,
+                             readable      = TRUE)
+
+if(comparison == "GO"| comparison == "all"){
+  compare_promedi_GO <- compareCluster(res_promedi,
+                             fun = enrichGO,
+                             OrgDb = "org.Mm.eg.db",
+                             keyType = "SYMBOL",
+                             ont = ont,
+                             pAdjustMethod = "BH",
+                             pvalueCutoff  = p.cutoff,
+                             readable = TRUE
+                             )
+  write.csv(as.data.frame(compare_promedi_GO),
+            file = file.path(charts_folder,
+                             "compare_promedi_GO.csv"),
+            row.names = FALSE)
+  compare_promedi <- compare_promedi_GO
+}
+
+if(comparison == "Reactome"| comparison == "all"){
+  compare_promedi_reactome <- compareCluster(promedi_entrez,
+                             fun = enrichPathway,
+                             organism = "mouse",
+                             pAdjustMethod = "BH",
+                             pvalueCutoff  = p.cutoff,
+                             readable = TRUE
+                             )
+  write.csv(as.data.frame(compare_promedi_reactome),
+            file = file.path(charts_folder,
+                             "compare_promedi_reactome.csv"),
+            row.names = FALSE)
+  compare_promedi <- compare_promedi_reactome
+}
+
+if(comparison == "KEGG"| comparison == "all"){
+  compare_promedi_KEGG <- compareCluster(promedi_entrez,
+                             fun = enrichKEGG,
+                             organism = "mmu",
+                             pAdjustMethod = "BH",
+                             pvalueCutoff  = p.cutoff,
+                             )
+  
+  compare_promedi_KEGG <- setReadable(compare_promedi_KEGG,
+                                    "org.Mm.eg.db",
+                                    keyType = "ENTREZID")
+  
+  compare_promedi_KEGG@compareClusterResult$Description <- gsub(
+      " - Mus musculus \\(house mouse)","",
+      compare_promedi_KEGG@compareClusterResult$Description)
+  
+  write.csv(as.data.frame(compare_promedi_KEGG),
+            file = file.path(charts_folder,
+                             "compare_promedi_Kegg.csv"),
+            row.names = FALSE)
+  compare_promedi <- compare_promedi_KEGG
+}
+```
+
+# Save results
+```{r}
+saveRDS(compare_promedi_GO,
+        file.path(GO_save_folder,"compare_promedi_GO.Rds"))
+saveRDS(compare_promedi_KEGG,
+        file.path(pathway_save_folder,"compare_promedi_kegg.Rds"))
+saveRDS(compare_promedi_reactome,
+        file.path(pathway_save_folder,"compare_promedi_reactome.Rds"))
+```
+# Load previous results
+```{r}
+down_compare_GO <- readRDS(file.path(GO_save_folder,
+                                     "down_compare_promedi_GO.Rds"))
+up_compare_GO <- readRDS(file.path(GO_save_folder,
+                                   "up_compare_promedi_GO.Rds"))
+```
+
+```{r}
+# Define the function
+generate_compare_promedi <- function(compare_GO, 
+                                     count_cutoff, 
+                                     topN, 
+                                     low_color, 
+                                     high_color, 
+                                     save_plot = FALSE, 
+                                     save_table = FALSE, 
+                                     plot_dir = "./", 
+                                     charts_dir = "./", 
+                                     plot_name = "plot", 
+                                     table_name = "table",
+                                     plot_width,
+                                     plot_height) {
+
+  # Filter and arrange by p-value
+  compare_promedi_filter <- compare_GO %>%
+    filter(Count > count_cutoff) %>%
+    arrange(p.adjust)
+  
+   # Save table
+  if (save_table) {
+    write.csv(as.data.frame(compare_promedi_filter@compareClusterResult), 
+              file = file.path(charts_dir, paste0(table_name, ".csv")), 
+              row.names = FALSE)
+    
+    write.xlsx(as.data.frame(compare_promedi_filter@compareClusterResult), 
+               file = file.path(charts_dir, paste0(table_name, ".xlsx")), 
+               rowNames = FALSE)
+  }
+  
+  # -log10 transformation of adjusted p-values
+  compare_promedi_filter@compareClusterResult$p.adjust <- 
+    -log10(compare_promedi_filter@compareClusterResult$p.adjust)
+  
+  # Maximal p-value for scale limits
+  max_p_promedi <- max(compare_promedi_filter@compareClusterResult$p.adjust)
+  max_p_promedi <- ifelse(max_p_promedi > 30, 30, max_p_promedi)
+  
+  # Prepare data for plotting (topN terms per Cluster)
+  df_promedi <- fortify(compare_promedi_filter, 
+                        showCategory = topN, 
+                        split = NULL)
+  
+  df_promedi <- droplevels(df_promedi)
+  
+  # Modify cluster names
+  x_labels <- gsub("\\n", " ", levels(df_promedi$Cluster))
+  levels(df_promedi$Cluster) <- x_labels
+  
+  # Add missing names
+  missing_pmd <- promedi.names[promedi.names %ni% 
+                                 strsplit2(unique(df_promedi$Cluster), " ")[, 1]]
+  
+  df_promedi <- add_missing_names(df_promedi, missing_pmd, compare_GO@geneClusters)
+  
+  # Add state for splitting
+  df_promedi$State <- df_promedi$Cluster
+  
+  levels(df_promedi$State) <- rep(c("Pro", "Med", "Dis"), each = 3)
+  
+  lvl_replace <- stri_replace_all_regex(levels(df_promedi$Cluster),
+                                     pattern = c(".pro", ".med", ".dis"),
+                                     replacement = rep("", 3),
+                                     vectorize_all = FALSE)
+  
+  levels(df_promedi$Cluster) <- lvl_replace
+  
+  # Clustering
+  markers <- df_promedi$Description %>% unique()
+  p_mat <- df_promedi %>%
+    filter(Description %in% markers) %>%
+    select(Description, Cluster, p.adjust) %>%
+    pivot_wider(names_from = Cluster, values_from = p.adjust) %>%
+    as.data.frame()
+  row.names(p_mat) <- p_mat$Description
+  p_mat <- p_mat[, -1]
+  p_mat[is.na(p_mat)] <- 0
+  
+  # Hierarchical clustering
+  clust <- hclust(dist(as.matrix(p_mat)), method = "complete")
+  
+  # Adjust Description for clustering order
+  df_promedi$Description <- fct_relevel(df_promedi$Description,
+                                        rev(clust$labels[clust$order]))
+  
+  df_promedi$Description_trunc <- sapply(df_promedi$Description, truncate_go_term)
+  
+  df_promedi$ID_desc <- paste(df_promedi$ID, df_promedi$Description_trunc)
+  
+  # Adjust p-value and calculate FoldEnrichment
+  df_promedi <- df_promedi %>%
+    mutate(p.adjust = ifelse(p.adjust > max_p_promedi, max_p_promedi, p.adjust)) %>%
+    mutate(FoldEnrichment = (GeneRatio / parse_ratio(BgRatio)))
+  
+  # Define theme
+  theme.dp_promedi <- list(
+    theme_dose(5),
+    facet_grid(~ State, scales = "free", space = "free", switch = "y"),
+    ylab(NULL),
+    theme(axis.title = element_blank(),
+          axis.text.x = element_text(angle = 90,
+                                     hjust = 1,
+                                     vjust = .5),
+           axis.text.y = element_text(angle = 45),
+          #panel.spacing = unit(x = 0.1, units = "cm"),
+          strip.background = element_blank(),
+          strip.placement = "outside",
+          strip.text = element_text(face = "bold",size = 5),
+          legend.text = element_text(size = 5),
+          legend.title = element_text(size = 5),
+          legend.title.position ="top",
+          legend.position = "inside",
+          legend.position.inside =  c(1.4,0), 
+          legend.direction = "horizontal",
+          legend.box = "vertical",
+          legend.spacing.x = unit(0.025, 'cm'),
+          legend.spacing.y = unit(0.025,"cm"),
+          legend.key.spacing.x = unit(0, 'cm'),
+          legend.background = element_blank(),
+          panel.background = element_blank(), #transparent panel bg
+          plot.background = element_blank(), #transparent plot bg
+          #panel.border = element_blank(),
+          axis.ticks = element_blank(),
+    ),
+    guides(size = guide_legend(order = 2),
+           color = guide_colorbar(order = 1,
+                                  title.theme =
+                                    element_text(
+                                      margin = margin(-15, 0, 0, 0, "pt"))
+           )
+    )
+  )
+  # Plot
+  plot <- ggplot(df_promedi, aes(x = Cluster, 
+                                 y = Description,
+                                 size = FoldEnrichment, 
+                                 color = p.adjust,
+                                 stroke = NA)) +
+    geom_point() +
+    scale_color_gradient(low = low_color, 
+                         high = high_color, limits = c(0, max_p_promedi)) +
+    theme.dp_promedi +
+    labs(color = "-log10 (p.adj.)") + scale_y_discrete(position = "right")
+  
+  # Save plot
+  if (save_plot) {
+    save_ggplot_formats(
+      plt = plot,
+      create_plot_subdir = TRUE,
+      base_plot_dir = plot_dir,
+      plt_name = plot_name,
+      width = plot_width,
+      height = plot_height
+    )  }
+  
+  return(plot)
+}
+
+```
+
+
+```{r}
+generate_compare_promedi(up_compare_GO, 
+                        count_cutoff = count.cutoff, 
+                        topN = topN, 
+                        low_color = pos_color_low, 
+                        high_color = pos_color_high, 
+                        save_plot = TRUE, 
+                        save_table = TRUE, 
+                        plot_dir = plots_folder,
+                        charts_dir = charts_folder, 
+                        plot_name = "promedi_up_compare_filter_GO", 
+                        table_name = "promedi_up_compare_filter_GO",
+                        plot_width = 3,
+                        plot_height = 6)
+```
+
+```{r}
+generate_compare_promedi(down_compare_GO, 
+                        count_cutoff = count.cutoff, 
+                        topN = topN, 
+                        low_color = neg_color_low, 
+                        high_color = neg_color_high, 
+                        save_plot = TRUE, 
+                        save_table = TRUE, 
+                        plot_dir = plots_folder,
+                        charts_dir = charts_folder, 
+                        plot_name = "promedi_down_compare_filter_GO", 
+                        table_name = "promedi_down_compare_filter_GO",
+                        plot_width = 2.75,
+                        plot_height = 6)
+```
+
