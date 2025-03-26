@@ -4,8 +4,8 @@ The following code was used to analyse different types of omics-data.
 
 The analysis is separated into different parts:
 
-* Bulk
-* Genome Mapping of bulk data using featurecounts
+* Bulk RNA Seq
+	* Genome Mapping of bulk data using featurecounts
 	* Bulk-RNA-Seq analysis using DESeq2
 		* Bulk analysis full small intestine only uninfected
 		* Bulk analysis full small intestine including infected
