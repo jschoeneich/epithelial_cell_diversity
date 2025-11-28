@@ -1,120 +1,476 @@
 ---
-title: "dorothea_ages_separate"
+title: "tf_analysis_modified (version 2025)"
 author: "Johannes Schöneich"
-date: "`r Sys.Date()`"
+date: '`r Sys.Date()`'
 output: html_document
 ---
 
-```{r setup, include=FALSE}
+# Libraries
+```{r setup, include = FALSE}
+## We load the required packages
+library(LR2TF)
+library(tidyverse)
+library(ComplexHeatmap)
+library(grid)
+library(stringr)
+library(maditr)
+library(circlize)
+library(glue)
 library(circlize)
 library(ComplexHeatmap)
-library(cowplot)
-library(glue)
-library(grid)
-library(LR2TF)
-library(maditr)
-library(openxlsx)
-library(patchwork)
-library(RColorBrewer)
-library(Scillus)
-library(scCustomize)
 library(Seurat)
-library(stringr)
-library(tidyverse)
+library(cowplot)
 
-harddrive <- "H:"
+harddrive <- "/media/johannes/EXTERNAL_USB/231248/NTFS_3.64TB"
 
-analysis_folder <- file.path(harddrive,"dorothea_tf_analysis/all_stages")
-dir.create(analysis_folder)
-
-source(file.path(harddrive,"scrna_datasets/save_load_helper.R"))
 source(file.path(harddrive,"helper_functions.R"))
-source(file.path(harddrive,"dorothea_tf_analysis/lr2tf_function.R"))
-
-plots_folder <- file.path(analysis_folder,"analysis/plots")
-charts_folder <- file.path(analysis_folder,"analysis/charts/")
-dir.create(plots_folder,recursive = TRUE)
-dir.create(charts_folder,recursive = TRUE)
-
+source(file.path(harddrive,"scrna_datasets/save_load_helper.R"))
+set.seed(1234)
 ```
 
+# Adjustments
 ```{r}
-scrna_folder <- file.path(harddrive,
-                          "scrna_datasets/scrna_both_d25",
-                          "scrna_full_2024_both_d25")
-
-cluster_use <- "int_0.3_broad"
-
-scrna <- load_object(
-  file.path(scrna_folder,"scrna_inf_bothd25.Rds")
-)
-Idents(scrna) <- "int_0.3_broad"
-scrna2 <- subset(scrna,idents = "Tuft",invert = TRUE)
-
-Idents(scrna2) <- "name"
-scrna2 <- subset(scrna2,idents = "d05i",invert = TRUE)
-scrna2$name <- droplevels(as.factor(scrna2$name))
-```
-
-```{r}
-net <- read.csv(file.path(charts_folder,"dorothea_regulons_ABCD.csv"))
-
-# Extract the normalized log-transformed counts
-mat <- as.matrix(scrna2@assays$RNA@data)
-
-# Run ulm
-acts <- run_ulm(mat = mat, net = net, 
-                .source = 'source', .target = 'target',
-                .mor = 'weight', minsize = 5)
-acts
-write.csv(acts,file.path(charts_folder,"acts_decoupler_scrna_size5.csv"),
-          row.names = FALSE)
-```
-
-```{r}
-DefaultAssay(scrna2) <- "RNA"
-
-parameters <- list("out_path" = file.path(analysis_folder,"analysis"),
-                   reg = file.path(charts_folder,"dorothea_regulons_ABCD.csv"),
-                   "organism" = "mouse",
-                   "celltype" = "int_0.3_broad", 
-                   #name of the meta data field defining cell identities
-                   "condition" = "name", #name of the meta data field defining conditions
-                   "comparison_list" = list(c("d01","d25")), 
-                   #list of condition comparison to consider
-                   "logfc" = 1,
-                   "pval" = 0.05, 
-                   #thresholds for logfc and pval used in 
-                   # differential transcription factor analysis
-                   "num_cell_filter" = 0) #define the minimum number of cells
-                    #per cluster to perform the analysis on
-
-results <- tf_activity_analysis_v2(seuratobject = scrna2,
-                                       tf_activities =
-                    file.path(charts_folder,"acts_decoupler_scrna_size5.csv"),
-                                       arguments_list = parameters)
-
-save_object(results,file.path(analysis_folder,"results_lr2tf_all_stages.Rds"))
-```
-
-```{r}
-condition <- "d01"
+condition <- "prWe"
 
 analysis_folder <- file.path(harddrive,
                           "dorothea_tf_analysis/analysis/TF_results")
 
 condition_folder <- file.path(analysis_folder,condition)
 
+comparison_df <- readRDS(file.path(analysis_folder,
+                                   "compared/comparison_dfs.Rds")
+                         )
+
+names(comparison_df) <- make.names(names(comparison_df))
+
+tf_vec <- c("Pdx1","Gata5","Hnf1a","Cdx2","Cdp","Sox9","Sox7","Sox17",
+            "Sox18","Hoxa13","Hoxd13","Spdef","Hes1","Atoh1","Wnt3a",
+            "Notch1","Ngn3","Tcf7l1","Klf4","Math1","Foxa2", "Gata4",
+            "Fgf4","Gfi1","Foxf1","Foxl1","Ctnnb1","Prdm1","Mafb","Spib",
+            "Tcf7l2")
+
+plots_folder <- file.path(analysis_folder,"plots")
+charts_folder <- file.path(analysis_folder,"charts")
+
+dir.create(plots_folder)
+dir.create(charts_folder)
+```
+
+```{r}
+comparison_df$prWe.vs.poWe$CellType <- gsub("+",".",
+                      comparison_df$prWe.vs.poWe$CellType,
+                      fixed = TRUE)
+
+rownames(comparison_df$prWe.vs.poWe) <- gsub("+",".",
+                       rownames(comparison_df$prWe.vs.poWe),
+                       fixed = TRUE)
+
+tf_activity_tables <- comparison_df
+
+tf_activity_tables$prWe.vs.poWe <- tf_activity_tables$prWe.vs.poWe %>% 
+ filter(tf %in% tf_vec)
+```
+
+# Calculate tf heatmap
+```{r}
+calculate_tf_heatmap <- function(nm_df, title, top_bot = FALSE){
+  nm_df <- as.data.frame(nm_df)
+  significant_res <- nm_df[nm_df$tag == "***", ]
+  significant_genes <- unique(significant_res$tf)
+  nm_df <- filter(nm_df, nm_df$tf %in% significant_genes)
+
+  
+  nm_df_short <- nm_df[c("r", "tf", "CellType")]
+  nm_df_clust <- tapply(nm_df_short$r, list(tf = nm_df_short$tf, 
+                        CellType = nm_df_short$CellType),
+                        mean)
+  
+  #nm_df_clust <- data.frame(nm_df_clust)
+  #nm_df_clust <- nm_df_clust[rownames(nm_df_clust) %in% tf_vec,] 
+  nm_df_clust <- as.matrix(nm_df_clust)
+  
+  if(top_bot == TRUE){
+   nm_df_clust <- as.data.frame(nm_df_clust) 
+   nm_df_clust$gene <- rownames(nm_df_clust)
+ 
+   df_long <- nm_df_clust %>%
+     pivot_longer(cols = c(Abs.Ent., EEC, Goblet.Paneth), 
+               names_to = "zscore_type", values_to = "zscore")
+ 
+   bot3 <- df_long %>% arrange(zscore) %>% group_by(zscore_type) %>% 
+     slice_head(n = 3)
+   top3 <- df_long %>% arrange(zscore) %>% group_by(zscore_type) %>% 
+     slice_tail(n = 3)
+   nm_df_clust <- nm_df_clust %>% filter(nm_df_clust$gene %in% 
+                                           c(bot3$gene,top3$gene)) %>% 
+     select(!gene) %>% as.matrix()
+  }
+  
+  tag_mapping <- nm_df[c("tf", "tag", "CellType")]
+  tag_mapping <- dcast(tag_mapping, tf ~ CellType, value.var = "tag")
+
+  #tag_mapping <- tag_mapping[rownames(tag_mapping) %in% tf_vec,] 
+  tag_mapping <- as.data.frame(tag_mapping)
+  
+  rownames(tag_mapping) <- tag_mapping$tf
+  tag_mapping$tf <- NULL
+  colnames(tag_mapping) <- colnames(nm_df_clust)
+   
+  col_min <- round(min(nm_df_clust, na.rm = TRUE),digits = 1)
+  col_max <- round(max(nm_df_clust, na.rm = TRUE),digits = 1)
+
+  fh <- function(x) fastcluster::hclust(dist(x))
+  p <- Heatmap(nm_df_clust, 
+        name = "r", 
+        cluster_rows = fh,
+        cluster_columns = FALSE, 
+        width = ncol(nm_df_clust) * unit(4, "mm"),
+        height = nrow(nm_df_clust) * unit(4, "mm"),
+        row_title = "Transcription Factor", 
+        column_title = title,
+        column_title_gp = gpar(fontsize = 7),
+        col = colorRamp2(c(col_min, 0, col_max), 
+                c("blue", "white", "red")),
+        row_names_gp = gpar(fontsize = 7),
+        column_names_gp = gpar(fontsize = 7),
+        column_labels = gsub("Goblet.Paneth","Goblet+Paneth",
+                             colnames(nm_df_clust),fixed = TRUE),
+        cell_fun = function(j, i, x, y, width, height, fill) {
+          grid.text(tag_mapping[as.character(rownames(nm_df_clust)[i]),
+                    as.character(colnames(nm_df_clust)[j])],
+                    x, y,
+                    gp = gpar(fontsize = 7))
+         })
+  return(p)
+}
+
+#function for condition
+calculate_tf_condition_heatmap <- function(seuratobject.markers, viper_scores, 
+                                           title, top_bot = FALSE){
+  seuratobject.markers$tag <- sapply(seuratobject.markers$p_val_adj,
+                   function(pval) {
+  if (pval < 0.001) {
+   txt <- "***"
+  } else if (pval < 0.01) {
+   txt <- "**"
+  } else if (pval < 0.05) {
+   txt <- "*"
+  } else {
+   txt <- "ns"
+  }
+  return(txt)
+ })
+ 
+ seuratobject.markers$log_fc_tag <- sapply(seuratobject.markers$avg_log2FC, 
+                      function(log_fc) {
+  if (log_fc >= 1.0) {
+   txt <- "***"
+  } else if (log_fc > 0.5) {
+   txt <- "**"
+  } else if (log_fc > 0.0) {
+   txt <- "*"
+  } else {
+   txt <- "ns"
+  }
+  return(txt)
+ })
+ 
+ tag_mapping <- seuratobject.markers[c("gene", "tag", "log_fc_tag", 
+                    "cluster", "p_val_adj", "avg_log2FC")]
+ 
+ tag_mapping <- as.data.frame(dcast(tag_mapping, gene ~ cluster, value.var = "tag"))
+ rownames(tag_mapping) <- tag_mapping$gene
+ 
+ tag_mapping$gene <- NULL
+ tag_mapping[is.na(tag_mapping)] <- "ns"
+ 
+ tag_mapping <- tag_mapping[rownames(viper_scores),]
+ colnames(tag_mapping) <- gsub("+",".",colnames(tag_mapping),fixed = TRUE)
+ 
+ tf_scores <- as.matrix(viper_scores)
+
+ if(top_bot == TRUE){
+   tf_scores <- as.data.frame(tf_scores) 
+   tf_scores$gene <- rownames(tf_scores)
+ 
+   df_long <- tf_scores %>%
+     pivot_longer(cols = c(Abs.Ent., EEC, Goblet.Paneth, Stem), 
+               names_to = "zscore_type", values_to = "zscore")
+ 
+   bot3 <- df_long %>% arrange(zscore) %>% group_by(zscore_type) %>% slice_head(n = 3)
+   top3 <- df_long %>% arrange(zscore) %>% group_by(zscore_type) %>% slice_tail(n = 3)
+   tf_scores <- tf_scores %>% filter(tf_scores$gene %in% c(bot3$gene,top3$gene)) %>% 
+     select(!gene) %>% as.matrix()
+ }
+ 
+ column_names_table <- colnames(tf_scores)
+ column_names_tags <- colnames(tag_mapping)
+ 
+ if (length(column_names_tags) < length(column_names_table)) {
+  missing_col <- setdiff(column_names_table, column_names_tags)
+  for (col in missing_col) {
+   tag_mapping[col] <- "ns"
+  }
+ }
+ 
+ rownames(tf_scores) <- gsub(".", "-", rownames(tf_scores), fixed = TRUE)
+ 
+ #col_min <- round(min(tf_scores, na.rm = TRUE),digits = 1)
+ #col_max <- round(max(tf_scores, na.rm = TRUE),digits = 1)
+ 
+ col_min = -4
+ col_max = 4
+ 
+ fh <- function(x) fastcluster::hclust(dist(x))
+ p <- Heatmap(tf_scores,
+        name = "z-score",
+        #cluster_rows = FALSE,
+        cluster_rows = fh,
+        cluster_columns = FALSE,
+        width = ncol(tf_scores) * unit(4, "mm"),
+        height = nrow(tf_scores) * unit(4, "mm"),
+        #row_title = "Transcription Factor", 
+        #column_title = glue("Celltype ({title})"),
+        column_title = title,
+        column_labels = gsub("Goblet.Paneth","Goblet+Paneth",
+                             colnames(tf_scores),fixed = TRUE),
+        row_names_gp = gpar(fontsize = 7), 
+        row_names_rot = 45,
+        column_names_gp = gpar(fontsize = 7),
+        heatmap_legend_param = c(labels_gp = gpar(fontsize = 7),
+                                                  title_gp = gpar(fontsize = 7, 
+                                                                  fontface = "bold")),
+        col = colorRamp2(c(col_min, 0, col_max), c("blue", "white", "red")),
+        cell_fun = function(j, i, x, y, width, height, fill) {
+         grid.text(tag_mapping[as.character(rownames(tf_scores)[i]), 
+                    as.character(colnames(tf_scores)[j])],
+              x, y, 
+              gp = gpar(fontsize = 7))
+        })
+ return(p)
+}
+```
+
+
+```{r}
+calculate_tf_condition_heatmap_transposed <- function(seuratobject.markers, 
+                                                      viper_scores,
+                                                      title, 
+                                                      top_bot = FALSE) {
+  
+  seuratobject.markers$tag <- sapply(seuratobject.markers$p_val_adj,
+                   function(pval) {
+    if (pval < 0.001) {
+      txt <- "***"
+    } else if (pval < 0.01) {
+      txt <- "**"
+    } else if (pval < 0.05) {
+      txt <- "*"
+    } else {
+      txt <- "ns"
+    }
+    return(txt)
+  }
+  )
+ 
+  seuratobject.markers$log_fc_tag <- sapply(seuratobject.markers$avg_log2FC, 
+                      function(log_fc) {
+    if (log_fc >= 1.0) {
+      txt <- "***"
+    } else if (log_fc > 0.5) {
+      txt <- "**"
+    } else if (log_fc > 0.0) {
+      txt <- "*"
+    } else {
+      txt <- "ns"
+    }
+    return(txt)
+  }
+  )
+ 
+  tag_mapping <- seuratobject.markers[c("gene", "tag", "log_fc_tag", 
+                    "cluster", "p_val_adj", "avg_log2FC")]
+ 
+  tag_mapping <- as.data.frame(dcast(tag_mapping, gene ~ cluster, value.var = "tag"))
+  rownames(tag_mapping) <- tag_mapping$gene
+ 
+  tag_mapping$gene <- NULL
+  tag_mapping[is.na(tag_mapping)] <- "ns"
+ 
+  tag_mapping <- tag_mapping[rownames(viper_scores),]
+  colnames(tag_mapping) <- gsub("+", ".", colnames(tag_mapping), fixed = TRUE)
+ 
+  tf_scores <- as.matrix(viper_scores)
+
+  if (top_bot == TRUE) {
+    tf_scores <- as.data.frame(tf_scores) 
+    tf_scores$gene <- rownames(tf_scores)
+ 
+    df_long <- tf_scores %>%
+      pivot_longer(cols = c(Abs.Ent., EEC, Goblet.Paneth, Stem), 
+               names_to = "zscore_type", values_to = "zscore")
+ 
+    bot3 <- df_long %>% arrange(zscore) %>% group_by(zscore_type) %>% slice_head(n = 3)
+    top3 <- df_long %>% arrange(zscore) %>% group_by(zscore_type) %>% slice_tail(n = 3)
+    tf_scores <- tf_scores %>% filter(tf_scores$gene %in% c(bot3$gene, top3$gene)) %>% 
+      select(!gene) %>% as.matrix()
+  }
+ 
+  column_names_table <- colnames(tf_scores)
+  column_names_tags <- colnames(tag_mapping)
+ 
+  if (length(column_names_tags) < length(column_names_table)) {
+    missing_col <- setdiff(column_names_table, column_names_tags)
+    for (col in missing_col) {
+      tag_mapping[col] <- "ns"
+    }
+  }
+ 
+  rownames(tf_scores) <- gsub(".", "-", rownames(tf_scores), fixed = TRUE)
+ 
+  # Transpose matrices for swapped axes
+  tf_scores <- t(tf_scores)
+  tag_mapping <- t(tag_mapping)
+ 
+  col_min <- round(min(tf_scores, na.rm = TRUE), digits = 1)
+  col_max <- round(max(tf_scores, na.rm = TRUE), digits = 1)
+ 
+  fh <- function(x) fastcluster::hclust(dist(x))
+  
+  p <- Heatmap(
+    tf_scores,
+    name = "z-score",
+    cluster_rows = FALSE,
+    cluster_columns = fh,
+    width = ncol(tf_scores) * unit(4, "mm"),
+    height = nrow(tf_scores) * unit(4, "mm"),
+    #row_title = "Cell Types/Clusters", 
+    #column_title = glue("Genes ({title})"),
+    column_labels = colnames(tf_scores),  # Updated to match transposed matrix
+    column_names_gp = gpar(fontsize = 7),
+    row_names_gp = gpar(fontsize = 7),
+    row_names_side = "left",
+    column_names_rot = 45,
+    heatmap_legend_param = list(
+      labels_gp = gpar(fontsize = 7),
+      title_gp = gpar(fontsize = 7, fontface = "bold")
+    ),
+    col = colorRamp2(c(col_min, 0, col_max), c("blue", "white", "red")),
+    cell_fun = function(j ,i, x, y, w, h, fill) {
+      grid.text(
+        tag_mapping[i, j],
+        x = x,
+        y = y,
+        gp = gpar(fontsize = 7)
+      )
+    }
+  )
+  return(p)
+}
+
+
+calc_ht_size <- function(ht, unit = "inch"){
+    pdf(NULL)
+    ht <- draw(ht)
+    
+    # Calculate the width and height of the heatmap
+    heatmap_width <- ComplexHeatmap:::width(ht)
+    heatmap_width <- convertX(heatmap_width, unit, 
+                              valueOnly = TRUE)
+    heatmap_height <- ComplexHeatmap:::height(ht)
+    heatmap_height <- convertY(heatmap_height, unit, 
+                               valueOnly = TRUE)
+    dev.off()
+    
+    fs <- ht@column_title_param$gp$fontsize
+    
+    title_char <- ht@column_title
+    if(is_empty(title_char)){
+      title_char <- ht@ht_list[[1]]@column_title
+    }
+    
+    # font does not use font size,but something else, so we need to check with par.
+    # implement when necessary
+    col_title_width <- strwidth(title_char, units = "inch", 
+                                font = fs)
+    
+    # Use the maximum width between the heatmap and the column title
+    total_width <- max(heatmap_width, col_title_width)
+    
+    return(c(total_width, heatmap_height))
+}
+```
+
+```{r}
+hm <- calculate_tf_heatmap(tf_activity_tables$prWe.vs.poWe,
+                           #title = "prWe.vs.poWe r effect size"
+                           title = element_blank())
+
+size <- calc_ht_size(hm)
+```
+
+```{r}
+save_ggplot_formats(
+  plt = hm,
+  base_plot_dir = plots_folder,
+  plt_name = "cluster_condition_activity_difference_v3",
+  width = size[1], height = size[2],
+  plot_obj = "heatmap"
+)
+```
+
+## use subset top 5 and subset top 3, bottom 3 (major changes) per cell type
+```{r}
+df <- comparison_df$prWe.vs.poWe
+
+### top 5 subset
+top5_vec <- df %>% arrange(FDR) %>% group_by(CellType) %>%
+  slice_head(n = 5) %>% pull(tf) %>% unique()
+
+top5df <- comparison_df$prWe.vs.poWe %>% 
+ filter(tf %in% top5_vec)
+
+hm_top5 <- calculate_tf_heatmap(top5df,
+  title = "prWe.vs.poWe r effect size (top 5 per celltype)"
+  )
+
+size <- calc_ht_size(hm_top5)
+```
+
+```{r}
+save_ggplot_formats(
+  plt = hm_top5,
+  base_plot_dir = plots_folder,
+  plt_name = "cluster_condition_activity_difference_top5_v3",
+  width = size[1], height = size[2],
+  plot_obj = "heatmap"
+  )
+```
+
+### top bottom 3
+```{r}
+hm_topbot <- calculate_tf_heatmap(df,
+    title = "prWe.vs.poWe r effect size (top/bottom 3 per celltype)",
+    top_bot = TRUE)
+
+size <- calc_ht_size(hm_topbot)
+
+save_ggplot_formats(
+  plt = hm_topbot,
+  base_plot_dir = plots_folder,
+  plt_name = "cluster_condition_activity_difference_topbot_v3",
+  width = size[1], height = size[2],
+  plot_obj = "heatmap"
+  )
 ```
 
 # Calculate transcription factor heatmap inside condition 
 ```{r}
-all_conditions <- c("d01","d05","d10","d25")
+condition <- "prWe"
 
 analysis_folder <- file.path(harddrive,
-                             "dorothea_tf_analysis/all_stages/analysis/TF_results/")
+                             "dorothea_tf_analysis/analysis/TF_results")
 
-for (condition in all_conditions) {
 condition_folder <- file.path(analysis_folder,condition)
 
 seuratobject.markers <- read.csv(
@@ -128,17 +484,52 @@ viper_scores <- read.csv(file.path(condition_folder,
                          row.names = 1
         )
 
-# condition_hm <- calculate_tf_condition_heatmap(
-#   seuratobject.markers = seuratobject.markers,
-#   viper_scores = viper_scores,
-#   title = condition
-#   #title = element_blank()
-#   )
-# 
-# size <- calc_ht_size(condition_hm)
+viper_scores_filtered <- viper_scores[rownames(viper_scores) %in% tf_vec,]
+```
 
-# condition subset top 5
+```{r}
+condition_hm <- calculate_tf_condition_heatmap(
+  seuratobject.markers = seuratobject.markers,
+  viper_scores = viper_scores,
+  #title = condition
+  title = element_blank()
+  )
 
+size <- calc_ht_size(condition_hm)
+```
+
+
+```{r}
+condition_hm_tp <- calculate_tf_condition_heatmap_transposed(
+  seuratobject.markers = seuratobject.markers,
+  viper_scores = viper_scores,
+  #title = condition
+  title = element_blank()
+  )
+
+size2 <- calc_ht_size(condition_hm_tp)
+
+save_ggplot_formats(
+  plt = condition_hm_tp,
+  base_plot_dir = plots_folder,
+  plt_name = glue("tf_activity_{condition}_test"),
+  width = size2[1], height = size2[2],
+  plot_obj = "heatmap"
+  )
+```
+
+```{r}
+save_ggplot_formats(
+  plt = condition_hm,
+  base_plot_dir = plots_folder,
+  plt_name = glue("tf_activity_{condition}_v3"),
+  width = size[1], height = size[2],
+  plot_obj = "heatmap"
+  )
+```
+
+# condition subset top 5 and top bottom 3
+```{r}
 seurat.markers_top5 <- seuratobject.markers %>% arrange(p_val_adj) %>%
   group_by(cluster) %>% slice_head(n = 5)
 
@@ -148,344 +539,531 @@ viper_scores_top5 <- viper_scores %>%
 condition_hm_top5 <- calculate_tf_condition_heatmap(
   seuratobject.markers = seurat.markers_top5,
   viper_scores = viper_scores_top5,
-  title = condition
-  #title = element_blank()
+  #title = condition
+  title = element_blank()
   )
 
 size <- calc_ht_size(condition_hm_top5)
+```
 
+```{r}
 save_ggplot_formats(
   plt = condition_hm_top5,
   base_plot_dir = plots_folder,
-  plt_name = glue("tf_activity_top5_{condition}_same_max"),
+  plt_name = glue("tf_activity_top5_{condition}_v3"),
   width = size[1], height = size[2],
   plot_obj = "heatmap"
   )
-}
 ```
 
-# upset plots
 ```{r}
-dorothea_markers_list <- lapply(all_conditions,function(x){NULL})
-names(dorothea_markers_list) <- all_conditions
-
-for(condition in all_conditions){
-  condition_folder <- file.path(analysis_folder,condition)
-  
-  dorothea_markers_list[[condition]] <- read.csv(
-    file.path(condition_folder,
-              glue("significant_cluster_tf_results_{condition}.csv")
-              ), row.names = 1
+condition_hm_topbot <- calculate_tf_condition_heatmap(
+    seuratobject.markers = seuratobject.markers,
+    viper_scores = viper_scores,
+    title = condition,
+    top_bot = TRUE
     )
-  dorothea_markers_list[[condition]]$cluster <-
-    as.factor(dorothea_markers_list[[condition]]$cluster
-              )
+
+size <- calc_ht_size(condition_hm_topbot)
+
+save_ggplot_formats(
+  plt = condition_hm_topbot,
+  base_plot_dir = plots_folder,
+  plt_name = glue("tf_activity_topbot_{condition}_v3"),
+  width = size[1], height = size[2],
+  plot_obj = "heatmap"
+  )
+```
+
+# Real transcription factor expression
+```{r}
+#transcription factor expression in heatmap (similar to the ones we already produced)
+
+scrna_folder <- file.path(harddrive,
+                          "scrna_datasets/scrna_both_d25/scrna_full_2024_both_d25")
+
+cluster_use <- "int_0.3_broad"
+
+scrna <- load_object(
+  file.path(scrna_folder,"scrna_uninf_bothd25.Rds")
+  )
+
+DefaultAssay(scrna) <- "RNA"
+
+Idents(scrna) <- cluster_use
+
+scrna_filtered <- subset(scrna, idents = c("Tuft"), invert = TRUE)
+```
+
+```{r}
+# Get the genenames in the row order f
+drawn_hm <- draw(hm_top5)
+row_order <- drawn_hm@ht_list$r@row_order
+
+genename <- rownames(hm_top5@matrix)[row_order]
+genename <- genename[genename %in% rownames(scrna_filtered@assays$RNA)]
+
+# Assuming scrna is your Seurat object and genename is your list of genes
+# Calculate average expression for each cluster
+average_expression <- AverageExpression(scrna_filtered, features = genename,
+                                        return.seurat = TRUE,
+                                        assays = "RNA")
+average_expression_matrix <- GetAssayData(average_expression, slot = "data")
+
+# Initialize matrices to store p-values and adjusted p-values (FDR)
+p_value_matrix <- matrix(nrow = length(genename), 
+                         ncol = length(levels(scrna_filtered))
+                         )
+
+rownames(p_value_matrix) <- genename
+colnames(p_value_matrix) <- levels(scrna_filtered)
+
+fdr_matrix <- p_value_matrix
+
+# Perform differential expression analysis for each cluster
+for (cluster in levels(scrna_filtered)) {
+  prWe_cells <- WhichCells(scrna_filtered, idents = cluster, 
+                           expression = stage == 'prWe')
+  poWe_cells <- WhichCells(scrna_filtered, idents = cluster,
+                           expression = stage == 'poWe')
+  
+  # Ensure there are enough cells for comparison
+  if (length(prWe_cells) > 1 & length(poWe_cells) > 1) {  
+    markers <- FindMarkers(scrna_filtered, ident.1 = prWe_cells,
+                           ident.2 = poWe_cells, features = genename)
+    
+    # Match gene names and fill in p_value_matrix and fdr_matrix
+    matched_genes <- intersect(genename, rownames(markers))
+    p_value_matrix[matched_genes, cluster] <- markers[matched_genes, "p_val"]
+    fdr_matrix[matched_genes, cluster] <- p.adjust(markers[matched_genes, "p_val"],
+                                                   method = "fdr")
+  } else {
+    p_value_matrix[, cluster] <- NA
+    fdr_matrix[, cluster] <- NA
+  }
+}
+```
+
+```{r}
+# Function to calculate effect size
+effect_size <- function(x, y) {
+  n_x <- length(x)
+  n_y <- length(y)
+  mean_diff <- mean(x) - mean(y)
+  pooled_sd <- sqrt(((n_x - 1) * stats::var(x) + (n_y - 1) * stats::var(y)) / (n_x + n_y - 2))
+  r <- mean_diff / pooled_sd
+  return(r)
 }
 
-dorothea_markers_list_split <-
-  lapply(dorothea_markers_list,function(x){split(x,x$cluster)})
+# Initialize a matrix to store effect sizes
+effect_size_matrix <- matrix(nrow = length(genename), 
+                             ncol = length(levels(scrna_filtered))
+                             )
+rownames(effect_size_matrix) <- genename
+colnames(effect_size_matrix) <- levels(scrna_filtered)
+
+# Calculate effect sizes for each gene in each cluster
+for (cluster in levels(scrna_filtered)) {
+  prWe_cells <- WhichCells(scrna_filtered, idents = cluster, 
+                           expression = stage == 'prWe')
+  poWe_cells <- WhichCells(scrna_filtered, idents = cluster, 
+                           expression = stage == 'poWe')
+  
+  for (gene in genename) {
+    prWe_data <- FetchData(scrna_filtered, vars = gene, cells = prWe_cells)[[gene]]
+    poWe_data <- FetchData(scrna_filtered, vars = gene, cells = poWe_cells)[[gene]]
+    
+    if (length(prWe_data) > 1 & length(poWe_data) > 1) {
+      effect_size_matrix[gene, cluster] <- effect_size(prWe_data, poWe_data)
+    } else {
+      effect_size_matrix[gene, cluster] <- NA
+    }
+  }
+}
+# Function to convert p-value to significance stars
+get_significance_stars <- function(pval) {
+  if (is.na(pval)) {
+    return("")
+  } else if (pval < 0.001) {
+    return("***")
+  } else if (pval < 0.01) {
+    return("**")
+  } else if (pval < 0.05) {
+    return("*")
+  } else {
+    return("ns")
+  }
+}
+
+col_min <- round(min(effect_size_matrix, na.rm = TRUE),digits = 1)
+col_max <- round(max(effect_size_matrix, na.rm = TRUE),digits = 1)
 ```
 
 ```{r}
-mat <- make_comb_mat(dorothea_genes)
+# Generate heatmap
+hm_effectsize <- Heatmap(as.matrix(effect_size_matrix), 
+        name = "r", 
+        #cluster_rows = fh,
+        cluster_rows = FALSE,
+        cluster_columns = FALSE, 
+        width = ncol(effect_size_matrix) * unit(4, "mm"),
+        height = nrow(effect_size_matrix) * unit(4, "mm"), 
+        row_title = "Transcription Factor",
+        #column_title = "Transcription factor expression change in single cell",
+        col = colorRamp2(c(col_min, 0, col_max), 
+                         c("blue", "white", "red")),
+          row_names_gp = gpar(fontsize = 7),
+        column_names_gp = gpar(fontsize = 7),
+        cell_fun = function(j, i, x, y, width, height, fill) {
+          sig_stars <- get_significance_stars(effect_size_matrix[i, j])
+          grid.text(sig_stars, x, y, gp = gpar(fontsize = 7))
+        }
+        )
 
-# Create the UpSet plot
-us_plot <- UpSet(mat,
-      top_annotation = upset_top_annotation(mat, add_numbers = TRUE),
-      right_annotation = upset_right_annotation(mat, add_numbers = TRUE),
-      comb_order = rev(order(comb_size(mat))),set_order = all_conditions,
-      bg_col = "white"
-      )
+size <- calc_ht_size(hm_effectsize)
 ```
 
 ```{r}
-# Flatten the nested list and extract only the gene columns
-collapsed_list <- unlist(
-  lapply(names(dorothea_markers_list_split), function(day) {
-    lapply(names(dorothea_markers_list_split[[day]]), function(cluster) {
-      genes <- dorothea_markers_list_split[[day]][[cluster]] %>% 
-        #filter(p_val_adj < 0.05 & abs(avg_log2FC) > 1 ) %>% 
-        pull(gene)
-      names(genes) <- NULL  # Remove any stray names from the vector
-      return(genes)
+save_ggplot_formats(
+  plt = hm_effectsize,
+  base_plot_dir = plots_folder,
+  plt_name = glue("tf_expression_in_sc_effect_size_prWe_poWe_v2"),
+  width = size[1], height = size[2],
+  plot_obj = "heatmap"
+  )
+```
+
+## Only the top 5 pre Weaning
+```{r}
+scrna_prWe <- subset(scrna_filtered, subset = stage == 'prWe')
+```
+
+```{r}
+drawn_hm <- draw(condition_hm_top5)
+row_order <- drawn_hm@ht_list[[1]]@row_order
+
+genename <- rownames(condition_hm_top5@matrix)[row_order]
+
+#Find missing genes
+missing_genes <- setdiff(genename,rownames(scrna_prWe@assays$RNA))
+
+intersect_genes <- intersect(genename,rownames(scrna_prWe@assays$RNA))
+
+#Objective: Add missing genes on the exact same position as before, also do this in the pvalue matrix
+
+# Calculate average expression for each cluster
+average_expression_prWe <- AverageExpression(scrna_prWe, 
+                                             features = intersect_genes,
+                                             return.seurat = TRUE,
+                                             assays = "RNA")
+average_expression_matrix_prWe <- GetAssayData(average_expression_prWe, slot = "data")
+```
+
+```{r}
+# Standardize (z-score) the average expression values
+z_score_matrix <- t(scale(t(average_expression_matrix_prWe)))
+
+# Function to calculate p-values for differential expression between clusters
+calculate_p_values <- function(scrna_obj, genes) {
+  clusters <- levels(scrna_obj)
+  p_value_matrix <- matrix(NA, nrow = length(genes), ncol = length(clusters))
+  rownames(p_value_matrix) <- genes
+  colnames(p_value_matrix) <- clusters
+  
+  for (gene in genes) {
+    expr_values <- FetchData(scrna_obj, vars = gene)
+    p_vals <- sapply(clusters, function(cluster) {
+      cluster_cells <- WhichCells(scrna_obj, idents = cluster)
+      other_cells <- setdiff(Cells(scrna_obj), cluster_cells)
+      t.test(expr_values[cluster_cells,], expr_values[other_cells,])$p.value
     })
-  }), recursive = FALSE
+    p_value_matrix[gene, ] <- p.adjust(p_vals, method = "fdr")
+  }
+  return(p_value_matrix)
+}
+
+# Calculate p-values for the prWe cells
+p_value_matrix_prWe <- calculate_p_values(scrna_prWe, intersect_genes)
+
+col_min <- round(min(z_score_matrix, na.rm = TRUE),digits = 1)
+col_max <- round(max(z_score_matrix, na.rm = TRUE),digits = 1)
+```
+
+```{r}
+add_missing_genes <- function(df, missing_genes, gene_vector) {
+  df <- as.data.frame(df)
+  # Create a dataframe for missing genes with expression levels set to NA
+  num_cols <- ncol(df)
+  missing_df <- data.frame(matrix(NA, nrow = length(missing_genes), ncol = num_cols))
+  rownames(missing_df) <- missing_genes
+  colnames(missing_df) <- colnames(df)
+  
+  # Add missing genes to the original dataframe
+  df <- rbind(df, missing_df)
+  
+  # Sort the dataframe to match the order of `gene_vector`
+  df <- df[match(gene_vector, rownames(df)), ]
+  
+  return(df)
+}
+
+z_score_matrix_mg <- add_missing_genes(z_score_matrix,missing_genes,genename)
+
+p_value_matrix_prWe_mg <- add_missing_genes(p_value_matrix_prWe,missing_genes,genename)
+
+z_score_matrix_mg_transposed <- t(z_score_matrix_mg)
+p_value_matrix_prWe_mg_transposed <- t(p_value_matrix_prWe_mg)
+
+
+# colnames(z_score_matrix_mg) <- gsub("+",".",
+#                        colnames(z_score_matrix_mg),
+#                        fixed = TRUE)
+# 
+# colnames(p_value_matrix_prWe_mg) <- gsub("+",".",
+#                        colnames(p_value_matrix_prWe_mg),
+#                        fixed = TRUE)
+
+```
+
+```{r}
+col_min = -4
+col_max = 4
+# Generate heatmap
+hm_prWe_same_maxima <- Heatmap(as.matrix(z_score_matrix_mg), 
+        name = "z-score", 
+        #cluster_rows = fh,
+        cluster_rows = FALSE,
+        cluster_columns = FALSE, 
+        width = ncol(z_score_matrix_mg) * unit(4, "mm"),
+        height = nrow(z_score_matrix_mg) * unit(4, "mm"), 
+        #row_title = "Transcription Factor",
+        #column_title = "Clusterwise tf expression change in single cell (prWe)",
+        column_labels = colnames(z_score_matrix_mg),
+        col = colorRamp2(c(col_min, 0, col_max), 
+                         c("blue", "white", "red")),
+        row_names_gp = gpar(fontsize = 7),
+        row_names_rot = 45,
+        column_names_gp = gpar(fontsize = 7),
+        cell_fun = function(j, i, x, y, width, height, fill) {
+          sig_stars <- get_significance_stars(p_value_matrix_prWe_mg[i, j])
+          grid.text(sig_stars, x, y, gp = gpar(fontsize = 7))
+        }
 )
 
-# Create the new names by combining day and cluster (e.g., "d01_eec")
-names(collapsed_list) <- unlist(
-  lapply(names(dorothea_markers_list_split), function(day) {
-    paste0(day, "_", tolower(names(dorothea_markers_list_split[[day]])))
-  })
+size <- calc_ht_size(hm_prWe_same_maxima)
+```
+
+```{r}
+col_min = -4
+col_max = 4
+# Generate heatmap
+hm_prWe_same_maxima_transposed <- Heatmap(as.matrix(z_score_matrix_mg_transposed), 
+        name = "z-score", 
+        #cluster_rows = fh,
+        cluster_rows = FALSE,
+        cluster_columns = FALSE, 
+        width = ncol(z_score_matrix_mg_transposed) * unit(4, "mm"),
+        height = nrow(z_score_matrix_mg_transposed) * unit(4, "mm"), 
+        #row_title = "Transcription Factor",
+        #column_title = "Clusterwise tf expression change in single cell (prWe)",
+        row_labels = rownames(z_score_matrix_mg_transposed),
+        col = colorRamp2(c(col_min, 0, col_max), 
+                         c("blue", "white", "red")),
+        row_names_gp = gpar(fontsize = 7),
+        row_names_side = "left",
+        column_names_rot = 45,
+        column_names_gp = gpar(fontsize = 7),
+        cell_fun = function(j, i, x, y, width, height, fill) {
+          sig_stars <- get_significance_stars(p_value_matrix_prWe_mg_transposed[i, j])
+          grid.text(sig_stars, x, y, gp = gpar(fontsize = 7))
+        }
 )
 
-mat <- make_comb_mat(collapsed_list)
+size <- calc_ht_size(hm_prWe_same_maxima_transposed)
+```
 
-# Create the UpSet plot
-us_plot <- UpSet(mat,
-      top_annotation = upset_top_annotation(mat, add_numbers = TRUE),
-      right_annotation = upset_right_annotation(mat, add_numbers = TRUE),
-      comb_order = rev(order(comb_size(mat))),
-      set_order = names(collapsed_list),
-      bg_col = "white"
-      )
 
-mat5 <- mat[comb_size(mat) >= 5]
 
-us_plot_size5 <- UpSet(mat5,
-      top_annotation = upset_top_annotation(mat5, add_numbers = TRUE),
-      right_annotation = upset_right_annotation(mat5, add_numbers = TRUE),
-      comb_order = rev(order(comb_size(mat5))),
-      set_order = names(collapsed_list),
-      bg_col = "white"
-      )
+```{r}
+col_min <- round(min(z_score_matrix, na.rm = TRUE),digits = 1)
+col_max <- round(max(z_score_matrix, na.rm = TRUE),digits = 1)
 
+# Generate heatmap
+hm_prWe <- Heatmap(as.matrix(z_score_matrix_mg), 
+        name = "z-score", 
+        #cluster_rows = fh,
+        cluster_rows = FALSE,
+        cluster_columns = FALSE, 
+        width = ncol(z_score_matrix_mg) * unit(4, "mm"),
+        height = nrow(z_score_matrix_mg) * unit(4, "mm"), 
+        #row_title = "Transcription Factor",
+        #column_title = "Clusterwise tf expression change in single cell (prWe)",
+        column_labels = colnames(z_score_matrix_mg),
+        col = colorRamp2(c(col_min, 0, col_max), 
+                         c("blue", "white", "red")),
+        row_names_gp = gpar(fontsize = 7),
+        column_names_gp = gpar(fontsize = 7),
+        cell_fun = function(j, i, x, y, width, height, fill) {
+          sig_stars <- get_significance_stars(p_value_matrix_prWe_mg[i, j])
+          grid.text(sig_stars, x, y, gp = gpar(fontsize = 7))
+        }
+)
+
+size <- calc_ht_size(hm_prWe)
 ```
 
 ```{r}
 save_ggplot_formats(
-  plt = us_plot,
+  plt = hm_prWe,
   base_plot_dir = plots_folder,
-  plot_obj = "not_gg",
-  plt_name = "upset_transcription_factors",
-  width = 12, height = 4
+  plt_name = glue("tf_expression_in_sc_prWe_v3"),
+  width = size[1], height = size[2],
+  plot_obj = "heatmap"
+  )
+```
+
+
+# Calculate again to make them all in one plot together -----
+```{r}
+hm <- calculate_tf_heatmap(tf_activity_tables$prWe.vs.poWe,
+                           #title = "prWe.vs.poWe r effect size"
+                           title = element_blank())
+
+condition_hm_top5 <- calculate_tf_condition_heatmap(
+  seuratobject.markers = seurat.markers_top5,
+  viper_scores = viper_scores_top5,
+  #title = condition
+  title = element_blank()
+  )
+```
+
+#do transposed heatmap for the paper
+```{r}
+condition_hm_top5_v2 <- calculate_tf_condition_heatmap_transposed(
+  seuratobject.markers = seurat.markers_top5,
+  viper_scores = viper_scores_top5,
+  #title = condition
+  title = element_blank()
+  )
+```
+
+```{r}
+col_min = -0.6
+col_max = 0.3
+
+# Create text-only legends for annotations
+top_annotation <- Legend(
+  at = character(0),
+  background = NA,
+  border = NA,
+  labels = "prWe", 
+  title = NULL, 
+  type = "text",
+  labels_gp = gpar(fontsize = 7)
 )
 
+bottom_annotation <- Legend(
+  at = character(0),
+  background = NA,
+  border = NA,
+  labels = "poWe", 
+  title = NULL, 
+  type = "text",
+  labels_gp = gpar(fontsize = 7)
+)
+
+# Create the main heatmap legend
+heatmap_legend <- Legend(
+  col_fun = colorRamp2(c(col_min, 0, col_max), c("blue", "white", "red")), 
+  title = "r", 
+  title_gp = gpar(fontsize = 7, fontface = "bold"),
+  labels_gp = gpar(fontsize = 7)
+)
+
+# Combine the legends into a single legend object
+combined_legend_top_mid <- packLegend(
+  top_annotation, 
+  heatmap_legend, 
+  direction = "vertical",
+  gap = unit(-2,"mm")
+)
+
+combined_legend <- packLegend(
+  combined_legend_top_mid,
+  bottom_annotation,
+  direction = "vertical",
+  gap = unit(2,"mm")
+)
+
+# Draw the heatmap with the combined legend next to it
+draw(hm, show_heatmap_legend = FALSE)
+draw(combined_legend, x = unit(0.73, "npc"), 
+     y = unit(0.65, "npc"), just = c("right", "center"))
+```
+
+```{r}
+hm_grid <- grid.grabExpr({draw(hm, show_heatmap_legend = FALSE, background = "transparent")
+                          draw(combined_legend, x = unit(0.89, "npc"), 
+                               y = unit(0.52, "npc"), just = c("right", "center")
+                          )
+                          }
+     )
+
+condition_hm_grid_no_legend <- condition_hm_top5 %>% draw(show_heatmap_legend = FALSE,
+                                                          background = "transparent") %>% 
+        grid.grabExpr()
+
+condition_hm_grid_legend <- condition_hm_top5 %>% draw(show_heatmap_legend = TRUE,
+                                                       background = "transparent") %>% 
+        grid.grabExpr()
+
+hm_prWe_grid_sm <- hm_prWe_same_maxima %>% draw(background = "transparent") %>% 
+        grid.grabExpr()
+
+hm_prWe_grid <- hm_prWe %>% draw(background = "transparent") %>% 
+        grid.grabExpr()
+```
+
+```{r}
+heatmap_grid_two_legend <- plot_grid(condition_hm_grid_no_legend,
+                                     hm_prWe_grid_sm,
+                                     rel_widths = c(1, 1),
+                                     nrow = 1)
 save_ggplot_formats(
-  plt = us_plot_size5,
+  plt = heatmap_grid_two_legend,
   base_plot_dir = plots_folder,
-  plot_obj = "not_gg",
-  plt_name = "upset_transcription_factors_min_size_5",
-  width = 10, height = 4
-)
-```
-
-```{r}
-# Get the set names in the order specified in your plot
-set_names <- names(collapsed_list)
-
-# Get all combination binary strings
-comb_binary <- comb_name(mat)
-
-# Order combinations by reversed size (to have highest to the left)
-comb_sizes <- comb_size(mat)
-comb_binary_ordered <- comb_binary[rev(order(comb_sizes))]
-
-# Function to map binary string to set names
-binary_to_sets <- function(binary, set_names) {
-  binary_vec <- as.numeric(strsplit(binary, "")[[1]])
-  active_sets <- set_names[which(binary_vec == 1)]
-  return(active_sets)
-}
-
-# Extract genes for each combination in the ordered list
-combination_genes <- lapply(comb_binary_ordered, function(binary) {
-  extract_comb(mat,binary)
-})
-
-# Name the list with human-readable combinations
-names(combination_genes) <- sapply(comb_binary_ordered, function(binary) {
-  active_sets <- binary_to_sets(binary, set_names)
-  paste(active_sets, collapse = "_and_")
-})
-```
-
-```{r}
-# Determine the maximum length
-max_length <- max(sapply(combination_genes, length))
-
-# Fill shorter columns with NA
-df <- data.frame(lapply(combination_genes, function(x) {
-  length(x) <- max_length  # Extend to max length
-  return(x)
-}))
-
-write.xlsx(df,file.path(charts_folder,"upsetplot_genes.xlsx"))
-```
-
-```{r}
-#TF subset lists abs.ent., eec and gob+pan
-
-ent_list <- collapsed_list[grep("abs.ent.",names(collapsed_list))]
-gob_list <- collapsed_list[grep("gob",names(collapsed_list))]
-eec_list <- collapsed_list[grep("eec",names(collapsed_list))]
-
-calculate_and_save_upset <- function(comb_list, Name, plots_folder, charts_folder){
-  mat <- make_comb_mat(comb_list)
-
-  # Create the UpSet plot
-  us_plot <- UpSet(mat,
-      top_annotation = upset_top_annotation(mat, add_numbers = TRUE),
-      right_annotation = upset_right_annotation(mat, add_numbers = TRUE),
-      comb_order = rev(order(comb_size(mat))),
-      set_order = names(comb_list),
-      bg_col = "white"
-      )
-
-  save_ggplot_formats(
-    plt = us_plot,
-    base_plot_dir = plots_folder,
-    plot_obj = "not_gg",
-    plt_name = glue("upset_transcription_factors_{Name}"),
-    width = 10, height = 4
+  plt_name = glue("heatmap_grid_two_legend_v4"),
+  width = 4, height = 6
   )
-  
-  # Get the set names in the order specified in the plot
-set_names <- names(comb_list)
+```
 
-# Get all combination binary strings
-comb_binary <- comb_name(mat)
+#Transposed Heatmaps
 
-# Order combinations by reversed size (to have highest to the left)
-comb_sizes <- comb_size(mat)
-comb_binary_ordered <- comb_binary[rev(order(comb_sizes))]
+```{r}
+condition_hm_grid_no_legend_transposed <- condition_hm_top5_v2 %>% 
+  draw(show_heatmap_legend = FALSE, background = "transparent") %>% 
+        grid.grabExpr()
 
-# Function to map binary string to set names
-binary_to_sets <- function(binary, set_names) {
-  binary_vec <- as.numeric(strsplit(binary, "")[[1]])
-  active_sets <- set_names[which(binary_vec == 1)]
-  return(active_sets)
-}
-
-# Extract genes for each combination in the ordered list
-combination_genes <- lapply(comb_binary_ordered, function(binary) {
-  extract_comb(mat,binary)
-})
-
-# Name the list with human-readable combinations
-names(combination_genes) <- sapply(comb_binary_ordered, function(binary) {
-  active_sets <- binary_to_sets(binary, set_names)
-  paste(active_sets, collapse = "_and_")
-})
-
-# Determine the maximum length
-max_length <- max(sapply(combination_genes, length))
-
-# Fill shorter columns with NA
-df <- data.frame(lapply(combination_genes, function(x) {
-  length(x) <- max_length  # Extend to max length
-  return(x)
-}))
-
-write.xlsx(df,file.path(charts_folder,glue("upsetplot_genes_{Name}.xlsx")))
-
-}
-
-calculate_and_save_upset(ent_list,
-                         Name = "enterocyte",
-                         plots_folder = plots_folder,
-                         charts_folder = charts_folder)
-
-calculate_and_save_upset(eec_list,
-                         Name = "eec",
-                         plots_folder = plots_folder,
-                         charts_folder = charts_folder)
-
-calculate_and_save_upset(gob_list,
-                         Name = "goblet_paneth",
-                         plots_folder = plots_folder,
-                         charts_folder = charts_folder)
+hm_prWe_grid_sm_transposed <- hm_prWe_same_maxima_transposed %>% 
+  draw(show_heatmap_legend = FALSE,background = "transparent") %>% 
+        grid.grabExpr()
 ```
 
 ```{r}
-#presence absence heatmap absorptive enterocytes
-#idea: we want for each subtype the top 15 TFs and see if they are present absent ()
-
-all_markers <- lapply(dorothea_markers_list,
-                      function(df){df %>% 
-                          filter(cluster != "Stem")
-                      }
-)
-
-top15_combined <- lapply(dorothea_markers_list,
-                      function(df){df %>% 
-                          filter(cluster != "Stem") %>%
-                          group_by(cluster) %>% 
-                          arrange(-z_score) %>%
-                          slice_head(n = 15)
-                      }
-                      ) %>% imap_dfr(~ mutate(.x, timepoint = .y))
-```
-
-```{r}
-#use full table for presence_absence and then filter down to top 15 per cluster
-
-# Combine all data frames into one
-combined_markers <- bind_rows(
-  lapply(names(all_markers), function(tp) {
-    df <- all_markers[[tp]]
-    df$timepoint <- tp
-    return(df)
-  })
-)
-
-# Generate presence matrix for each cluster
-presence_matrices <- combined_markers %>%
-  mutate(presence = 1) %>%
-  select(gene, cluster, timepoint, presence) %>%
-  pivot_wider(names_from = timepoint, values_from = presence, values_fill = 0)
-
-# Enhanced heatmap plotting function for a given cluster
-plot_cluster_heatmap <- function(cluster_name) {
-  
-  top15_combined_tmp <- top15_combined %>% filter(cluster == cluster_name)
-  
-  # Prepare data for ComplexHeatmap
-  cluster_data <- presence_matrices %>%
-    filter(cluster == cluster_name & gene %in% top15_combined_tmp$gene) %>%
-    ungroup() %>%
-    select(-cluster)
-  
-  mat <- as.matrix(cluster_data[,-1])
-  rownames(mat) <- cluster_data$gene
-  
-  # Define color scheme
-  col_fun <- colorRamp2(c(0, 1), c("white", "#1f77b4"))  # Blue for presence, white for absence
-  
-  # Create the heatmap
-  ht <- Heatmap(
-    mat,
-    name = "Presence",
-    col = col_fun,
-    show_row_names = TRUE,
-    show_column_names = TRUE,
-    column_title = paste("Cluster:", cluster_name),
-    row_names_gp = gpar(fontsize = 5),
-    row_names_rot = 45,
-    column_names_gp = gpar(fontsize = 5),
-    show_heatmap_legend = FALSE,
-    cluster_columns = FALSE,
-    rect_gp = gpar(col = "black", lwd = 0.5),  # Adding borders around individual cells
-    width = unit(ncol(mat) * 2.5, "mm"),        # Control cell width
-    height = unit(nrow(mat) * 2.5, "mm")        # Control cell height
+heatmap_grid_transposed <- plot_grid(condition_hm_grid_no_legend_transposed,
+                                     hm_prWe_grid_sm_transposed,
+                                     rel_widths = c(1, 1),
+                                     nrow = 2)
+save_ggplot_formats(
+  plt = heatmap_grid_transposed,
+  base_plot_dir = plots_folder,
+  plt_name = glue("heatmap_grid_two_legend_v5"),
+  width = 4, height = 2.5
   )
-  
-  return(ht)
-}
-
-# Get all unique clusters
-all_clusters <- unique(presence_matrices$cluster)
-
-# Generate heatmaps for each cluster
-heatmap_list <- lapply(all_clusters, plot_cluster_heatmap)
-# Get all unique clusters
-all_clusters <- unique(presence_matrices$cluster)
-
-plot_cluster_heatmap("EEC")
 ```
+
 
 ```{r}
-for (cluster_name in all_clusters) {
-  p <- plot_cluster_heatmap(cluster_name)
-  size <- calc_ht_size(p)
-
-  save_ggplot_formats(
-    plt = p,
-    base_plot_dir = plots_folder,
-    plt_name = glue("presence_absence_tf_{cluster_name}_rot"),
-    width = size[1], height = size[2],
-    plot_obj = "heatmap"
-  )
-}
+#save workspace
+save.image(file.path(harddrive,"workspaces/workspace_tf_analysis.Rdata"))
 ```
-
