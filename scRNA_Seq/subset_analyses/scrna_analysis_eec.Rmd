@@ -21,7 +21,7 @@ library(scCustomize)
 
 # Adjustments
 ```{r}
-harddrive <- "H:"
+harddrive <- "D:/231248/NTFS_3.64TB/"
 
 source(file.path(harddrive,"helper_functions.R"))
 #custom themes
@@ -30,7 +30,7 @@ source(file.path(harddrive,"scrna_datasets/single_cell_themes.R"))
 source(file.path(harddrive,"scrna_datasets/save_load_helper.R"))
 
 analysis_folder <- file.path(harddrive,
-                          "scrna_datasets/scrna_both_d25/scrna_full_2024_both_d25_eec")
+                          "subsets/subsets_2025/save")
 
 cluster_use <- "harmony_inte_clusters"
 ```
@@ -107,27 +107,6 @@ scrna_eec_uninf <- load_object(file.path(analysis_folder,
 ```
 
 ```{r, fig.width = 30}
-#TODO bring order into the chaos
-
-
-# Define a function to generate the plots
-generate_split_plot <- function(i, scrna, cols, levels) {
-  current_level <- levels[i]
-  #cell_number <- table(scrna$harmony_inte_clusters)[i] # TODO: fix for automation
-#  cell_number <- table(scrna$name)[i] # TODO: fix for automation
-  cols.highlight <- cols[i]
-  title <- glue("{current_level}") # ({cell_number})")
-  DimPlot(scrna, 
-          label = FALSE, 
-          reduction = "harmony_UMAP", 
-          cells.highlight = WhichCells(scrna, idents = current_level),
-          cols.highlight = cols.highlight,
-          cols = "lightgrey",
-          sizes.highlight = 1) +
-    ggtitle(title) + mini_umap_theme & NoLegend() 
-} 
-
-
 Idents(scrna_eec) <- cluster_use
 
 scrna_eec$harmony_inte_clusters <- as.factor(scrna_eec$harmony_inte_clusters)
@@ -217,8 +196,8 @@ save_ggplot_formats(
 ```
 
 ```{r}
-cluster_use <- "RNA_snn_res.0.6"
-Idents(scrna_eec_uninf) <- "RNA_snn_res.0.6"
+cluster_use <- "RNA_snn_res.0.4"
+Idents(scrna_eec_uninf) <- "RNA_snn_res.0.4"
 
 haber_markers_gpcr <- c(
   "Vipr1", "Ffar2", "Gper1", "Gpr119", "Gpbar1", 
@@ -261,10 +240,10 @@ dp_eec <- DotPlot_scCustom(
       assay = "RNA",
       colors_use = viridis_plasma_dark_high,
       x_lab_rotate = TRUE
-      ) + theme(legend.text = element_text(size = 12),
+      ) + theme(legend.text = element_text(size = 7),
                 #legend.key.size = element_text(size = 20),
-                legend.title = element_text(size = 12),
-        axis.text.x  = element_text(size = 12),
+                legend.title = element_text(size = 7),
+        axis.text.x  = element_text(size = 7),
         axis.text.y = element_text(size = 12)
         )
 
@@ -278,12 +257,14 @@ reg4_tac1_fp <- FeaturePlot(scrna_eec_uninf,
   blend = TRUE) & fp_theme
 
 
+
+
 #names c5: sst (D Cells), 1 = tac1 (Enterochromaffin Cells) 4 = reg4 (EC-Reg4),
 # 3=cck (I cells), 2= Gip (K Cells), 0 = Sct,Nts,Pyy (SLN Cells)
 # 
 
 
-#names new 
+#names new (2024)
 # 0 = Tac1 +Reg4 (EC Reg4)
 # 1 = Nts (SIN)
 # 2 = Pyy (SIL-P) 
@@ -291,12 +272,46 @@ reg4_tac1_fp <- FeaturePlot(scrna_eec_uninf,
 # 4 = Sct, Cck, Ghrl (SILA)
 # 5 = (EC)
 # 6 = Sst and Iapp (SAKD Cells) 
+# 
+# names 2025
+# 0 = EC Tph1
+# 1 = SILN Early_EEC 
+# 2 = EC-Reg4 Tph1 + Reg4
+# 3 = SIK-P K Gip
+# 4 = SIN N Nts
+# 5 = SILA I Cck
+# 6 = SAKD D Sst and Iapp
+```
+
+```{r}
+scrna_eec$sub_annotation <- scrna_eec$RNA_snn_res.0.4
+
+Idents(scrna_eec) <- "sub_annotation" 
+
+new_names <- c("EC","Early EEC","EC-Reg4","K","N","I","D")
+names(new_names) <- levels(scrna_eec)
+
+scrna_eec <- RenameIdents(scrna_eec,new_names)
+
+levels(scrna_eec$sub_annotation) <- new_names
+
+eec_umap <- DimPlot(scrna_eec, group.by = "sub_annotation",
+                    reduction = "harmony_UMAP",
+                    cols = "Set3") & mini_umap_theme & ggtitle(element_blank())
+
+eec_umap_name <- DimPlot(scrna_eec, 
+                         reduction = "harmony_UMAP", 
+                         group.by = "stage") & mini_umap_theme & ggtitle(element_blank())
+
+Idents(scrna_eec) <- "stage"
+scrna_eec_uninf <- subset(scrna_eec,idents = "d05i", invert = TRUE)
 ```
 
 ```{r}
 cluster_use <-  "sub_annotation"
-markers_new <- c("Reg4", "Tac1","Tph1","Nts","Pyy","Sct",
-                 "Gip","Cck","Sst","Iapp","Ghrl")
+markers_new <- c("Tph1","Chga","Chgb","Sct",
+                 "Reg4","Gip","Nts","Cck",
+                 "Sst")
 
 fp_new_marker <- FeaturePlot(
   object = scrna_eec_uninf,
@@ -325,12 +340,20 @@ dp_new_marker <- DotPlot_scCustom(
       assay = "RNA",
       colors_use = viridis_plasma_dark_high,
       x_lab_rotate = TRUE
-      ) + theme(legend.text = element_text(size = 12),
+      ) + theme(legend.text = element_text(size = 7),
                 #legend.key.size = element_text(size = 20),
-                legend.title = element_text(size = 12),
-        axis.text.x  = element_text(size = 12),
-        axis.text.y = element_text(size = 12)
-        )
+                legend.title = element_text(size = 7),
+        axis.text.x  = element_text(size = 7),
+        axis.text.y = element_text(size = 7),
+        axis.ticks = element_blank(),
+        legend.position = "top",
+        legend.background = element_blank(),
+        legend.box = "vertical",       # stack legends vertically
+      legend.title.align = 0.5,
+      legend.title.position = "top",
+      legend.spacing.y = unit(0.5, "cm"),
+      legend.key.spacing = unit(0.001,"cm")
+  )
 
 save_ggplot_formats(
   plt = fp_new_marker,
@@ -350,43 +373,26 @@ save_ggplot_formats(
       plt = dp_new_marker,
       base_plot_dir = plots_folder,
       plt_name = "dp_haber_haber_final_markers_sub_annotation",
-      width = 6,
+      width = 3,
       height = 3.5
 )
-```
-
-```{r}
-scrna_eec_uninf$sub_annotation <- scrna_eec_uninf$RNA_snn_res.0.6
-
-Idents(scrna_eec_uninf) <- "sub_annotation" 
-
-new_names <- c("EC–Reg4","SIN","SIL-P","SIK","SILA","EC","SAKD")
-names(new_names) <- levels(scrna_eec_uninf)
-
-scrna_eec_uninf <- RenameIdents(scrna_eec_uninf,new_names)
-
-levels(scrna_eec_uninf$sub_annotation) <- new_names
-
-eec_umap <- DimPlot(scrna_eec_uninf, reduction = "harmony_UMAP", cols = "Set3") & mini_umap_theme
-eec_umap_name <- DimPlot(scrna_eec_uninf, reduction = "harmony_UMAP", group.by = "name") & mini_umap_theme & ggtitle(element_blank())
 ```
 
 ```{r}
 save_ggplot_formats(
   plt = eec_umap,
   base_plot_dir = plots_folder,
-  plt_name = "eec_umap",
-  width = 4.5, height = 4
+  plt_name = "eec_umap_noc2_no11",
+  width = 3.5, height = 3
 )
 
 save_ggplot_formats(
   plt = eec_umap_name,
   base_plot_dir = plots_folder,
   plt_name = "eec_umap_name",
-  width = 7, height = 6
+  width = 4.5, height = 4
 )
 ```
-
 
 ```{r}
 save_ggplot_formats(
@@ -400,7 +406,7 @@ save_ggplot_formats(
   plt = vp,
   base_plot_dir = plots_folder,
   plt_name = "vp_haber_all_haber",
-  width = 12, height = 8
+  width = 12, height = 12
 )
 
 save_ggplot_formats(
@@ -411,3 +417,45 @@ save_ggplot_formats(
       height = 3.5
 )
 ```
+
+#Barplot and Proportions
+```{r}
+generate_prop_table(scrna = scrna_eec,
+                    table_vars = c("stage","sub_annotation"),
+                    name = "eec_inf_noc2",
+                    plots_folder = plots_folder )
+
+generate_prop_table(scrna = scrna_eec_uninf,
+                    table_vars = c("stage","sub_annotation"),
+                    name = "eec_uninf_noc2",
+                    plots_folder = plots_folder )
+
+
+cluster_proportion <- t(prop.table(x = table(scrna_eec_uninf$sub_annotation,
+                                                  scrna_eec_uninf$stage),
+                                        margin = 2))
+
+cp.df <- as.data.frame(cluster_proportion)
+colnames(cp.df) <- c("timepoint","cluster","proportion")
+
+# Create the stacked barplot using ggplot2
+barplot_stacked <- ggplot(cp.df, aes(x = timepoint, y = proportion, 
+                                     fill = cluster)) +
+  geom_bar(stat = "identity", position = "stack") +
+  geom_text(
+    aes(label = ifelse(proportion >= 0.02, 
+                       sprintf("%.1f%%",
+                               proportion * 100), "")),
+    position = position_stack(vjust = 0.5), size = 2) + 
+  barplot_theme + scale_fill_brewer(palette = "Set3") 
+```
+
+```{r}
+save_ggplot_formats(
+  plt = barplot_stacked,
+  base_plot_dir = plots_folder,
+  plt_name = "barplot_proportions_eec_uninfected",
+  width = 3, height = 3
+)
+```
+
