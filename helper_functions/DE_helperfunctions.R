@@ -1,4 +1,68 @@
 # define helper functions ----
+`%ni%` <- Negate(`%in%`)
+
+# save function
+save_ggplot_formats = function(
+    plt, base_plot_dir, plt_name, create_plot_subdir = TRUE,
+    formats = c("png", "pdf"), units = "in", width = 20, height = 20,
+    type = "cairo", res = 300,
+    plot_obj = "ggplot",
+    ...
+){
+  # if theres a plot and basedir
+  if(!is.null(base_plot_dir) & !is.null(plt)){
+    # for each format
+    for(fmt in formats){
+      f_path_fmt = file.path(base_plot_dir, paste0(plt_name, ".", fmt))
+      if(create_plot_subdir) dir.create(file.path(base_plot_dir,fmt),recursive = TRUE,
+                                        showWarnings = FALSE)
+      if(dir.exists(file.path(base_plot_dir,fmt))) f_path_fmt = file.path(base_plot_dir,fmt,paste0(plt_name,".",fmt))
+      if(plot_obj == "ggplot"){
+        if(fmt == "png"){
+          ggplot2::ggsave(
+            filename = f_path_fmt,
+            plot = plt,
+            device = fmt,
+            units = units,
+            width = width,
+            height = height,
+            type = type, ...
+          )
+        }else{
+          ggplot2::ggsave(
+            filename = f_path_fmt,
+            plot = plt,
+            device = fmt,
+            units = units,
+            width = width,
+            height = height, ...
+          )
+        }
+      }else
+        if(fmt == "png"){
+          png(
+            filename = f_path_fmt,
+            units = units,
+            width = width,
+            height = height,
+            type = type,
+            res = res
+          )
+          draw(plt, ...)
+          dev.off()
+        }else{
+          pdf(
+            file = f_path_fmt,
+            width = width,
+            height = height
+          )
+          draw(plt, ...)
+          dev.off()
+        }
+    }
+  }
+}
+
 calculate_results_list_presto <- function(scrna) {
   # Generate all pairwise combinations of timepoints
   combination <- combn(levels(scrna), 2)
@@ -36,14 +100,14 @@ GeneBarPlot <- function(de.data, xlim = NULL, main = NULL) {
   }
   if (any(colnames(de.data) == "cluster")) {
     top5.up <- de.data %>% group_by(cluster) %>% top_n(10, avg_log2FC) %>% 
-      filter(avg_log2FC > 0) %>% arrange(-avg_log2FC)
+      dplyr::filter(avg_log2FC > 0) %>% arrange(-avg_log2FC)
     top5.dn <- de.data %>% group_by(cluster) %>% top_n(10, -avg_log2FC) %>%
-      filter(avg_log2FC < 0) %>% arrange(-avg_log2FC)
+      dplyr::filter(avg_log2FC < 0) %>% arrange(-avg_log2FC)
   } else {
     top5.up <- de.data  %>% top_n(10, avg_log2FC) %>%
-      filter(avg_log2FC > 0) %>% arrange(-avg_log2FC)
+      dplyr::filter(avg_log2FC > 0) %>% arrange(-avg_log2FC)
     top5.dn <- de.data  %>% top_n(10, -avg_log2FC) %>%
-      filter(avg_log2FC < 0) %>% arrange(-avg_log2FC)
+      dplyr::filter(avg_log2FC < 0) %>% arrange(-avg_log2FC)
   }
   top.up.dn <- rbind(top5.up, top5.dn)
   top.up.dn$gene <- make.unique(top.up.dn$gene)
@@ -211,7 +275,7 @@ fisher_dataframe <- function(countmatrix,cm2meanspattern.split,gene.co.exp_vec){
   var.name <- substitute(gene.co.exp_vec)
   colnames(df)[c(1,2,4)] <- c(var.name,glue("not.{var.name}"),glue("not.{var.name}.not.pattern"))
   
-  #df_filter <- df %>% filter(p_val_adj < 0.05 )
+  #df_filter <- df %>% dplyr::filter(p_val_adj < 0.05 )
   #return(df_filter)
   return(df)
 }
@@ -362,7 +426,7 @@ generate_volcano_plots <- function(results_list,
     down_genes <- sum(res$avg_log2FC <= -1 & res$p_val_adj <= 0.05)
     
     # contrib_genes <- as.data.frame(res) %>% 
-    #   filter(symbol %in% rownames(contribution_df)) %>% filter(
+    #   dplyr::filter(symbol %in% rownames(contribution_df)) %>% dplyr::filter(
     #     abs(avg_log2FC) >= 1 & p_val_adj <= 0.05) %>% pull(symbol)
     
     #contrib_intersect <- intersect(c(bot20$symbol,top20$symbol), contrib_genes)
@@ -398,12 +462,12 @@ generate_volcano_plots <- function(results_list,
                            #legendPosition = "right",
                            #shapeCustom = custom_shape,
                            #pointSize = custom_size,
-                           #title = glue("{daypos} vs. {dayneg}"),
-                           #subtitle = glue("{dayneg}:{down_genes} {daypos}:{up_genes}"),
-                           #caption = paste0("total = ", nrow(res), " genes"),
-                           title = NULL,
-                           subtitle = NULL,
-                           caption = NULL,
+                           title = glue("{daypos} vs. {dayneg}"),
+                           subtitle = glue("{dayneg}:{down_genes} {daypos}:{up_genes}"),
+                           caption = paste0("total = ", nrow(res), " genes"),
+                           # title = NULL,
+                           # subtitle = NULL,
+                           # caption = NULL,
                            legendLabels = NULL,
                            raster = TRUE,
                            xlim = c(xmin,xmax)
@@ -423,13 +487,14 @@ generate_volcano_plots <- function(results_list,
     save_ggplot_formats(
       plt = plt,
       base_plot_dir = plots_folder,
+      create_plot_subdir = TRUE,
       plt_name = glue("{filename_prefix}_Volcano_{daypos}_vs_{dayneg}",
                       "_quantile_cutoff_{condition}"),
-      width = 2.5, height = 2.5  # Updated width and height
+      width = 2, height = 2.5  # Updated width and height
     )
     
     # Save the filtered DE genes to CSV and Excel
-    df2 <- res %>% filter((avg_log2FC >= 1 & p_val_adj <= 0.05) | 
+    df2 <- res %>% dplyr::filter((avg_log2FC >= 1 & p_val_adj <= 0.05) | 
                             (avg_log2FC <= -1 & p_val_adj <= 0.05))
     
      write.csv(df2, file = 
@@ -465,7 +530,7 @@ generate_volcano_plots <- function(results_list,
 
     # For each layout option, calculate width and height (multiples of 7)
     layout_dimensions <- lapply(layout_options, function(layout) {
-      width <- layout$cols * 2.5
+      width <- layout$cols * 2
       height <- layout$rows * 2.5
       return(list(rows = layout$rows, cols = layout$cols, width = width, height = height))
     })
@@ -496,6 +561,7 @@ generate_volcano_plots <- function(results_list,
     save_ggplot_formats(
       plt = combined_plot,
       base_plot_dir = plots_folder,
+      create_plot_subdir = TRUE,
       plt_name = glue("{filename_prefix}_Combined_Volcano_Plots_Layout_{i}"),
       width = current_layout$width,
       height = current_layout$height
@@ -549,8 +615,8 @@ generate_volcano_plots_mark_unique <- function(results_list,
     
     #colnames(res)[c(2,5)] <- c("avg_log2FC","p_val_adj")
     days <- strsplit(condition, "_")[[1]]
-    # dayneg <- "d05"
-    # daypos <- "d05i"
+     dayneg <- "d05"
+     daypos <- "d05i"
     
     #top 20
     top20 <- res %>% top_n(10,avg_log2FC) %>% arrange(-avg_log2FC)
@@ -589,7 +655,7 @@ generate_volcano_plots_mark_unique <- function(results_list,
     # Count the significant genes
     up_genes <- sum(res$avg_log2FC >= 1 & res$p_val_adj <= 0.05)
     down_genes <- sum(res$avg_log2FC <= -1 & res$p_val_adj <= 0.05)
-    unique_labels <- res %>% filter(avg_log2FC >= 1 & p_val_adj <= 0.05 &
+    unique_labels <- res %>% dplyr::filter(avg_log2FC >= 1 & p_val_adj <= 0.05 &
                                       symbol %in% unique_genes) %>% pull(symbol)
     
     # Custom colors for points
@@ -616,8 +682,8 @@ generate_volcano_plots_mark_unique <- function(results_list,
                            selectLab = c(bot20$symbol,top20$symbol),
                            #selectLab = contrib_genes,
                            #selectLab = contrib_intersect,
-                           #drawConnectors = FALSE,
-                           drawConnectors = TRUE,
+                           drawConnectors = FALSE,
+                           #drawConnectors = TRUE,
                            widthConnectors = 0.5,
                            arrowheads = FALSE,
                            max.overlaps = Inf,
@@ -628,11 +694,11 @@ generate_volcano_plots_mark_unique <- function(results_list,
                            colAlpha = 0.5,
                            labSize = 2,
                            pointSize = 1,
-                           axisLabSize = 5,
-                           titleLabSize = 5,
-                           subtitleLabSize = 5,
-                           captionLabSize = 5,
-                           legendLabSize = 5,
+                           axisLabSize = 7,
+                           titleLabSize = 7,
+                           subtitleLabSize = 7,
+                           captionLabSize = 7,
+                           legendLabSize = 7,
                            legendIconSize = 2,
                            #legendPosition = "right",
                            #shapeCustom = custom_shape,
@@ -662,12 +728,13 @@ generate_volcano_plots_mark_unique <- function(results_list,
       save_ggplot_formats(
         plt = plt,
         base_plot_dir = plots_folder,
+        create_plot_subdir = TRUE,
         plt_name = glue("{filename_prefix}_Volcano_{daypos}_vs_{dayneg}_quantile_cutoff_{condition}_marked"),
         width = 2.5, height = 2.5  # Updated width and height
       )
       
       # Save the filtered DE genes to CSV and Excel
-      df2 <- res %>% filter((avg_log2FC >= 1 & p_val_adj <= 0.05) | 
+      df2 <- res %>% dplyr::filter((avg_log2FC >= 1 & p_val_adj <= 0.05) | 
                               (avg_log2FC <= -1 & p_val_adj <= 0.05))
       
       write.csv(df2, file = file.path(charts_folder, 
@@ -676,7 +743,7 @@ generate_volcano_plots_mark_unique <- function(results_list,
                 row.names = FALSE)
       write.xlsx(df2, file = file.path(charts_folder,
                                        glue("{filename_prefix}_DE_{daypos}",
-                                            "_vs_{dayneg}_{condition}:marked.xlsx")), 
+                                            "_vs_{dayneg}_{condition}_marked.xlsx")), 
                  rowNames = FALSE)
     }
     # Append the plot to the list
@@ -715,7 +782,8 @@ generate_volcano_plots_mark_unique <- function(results_list,
   
   # Example application based on the number of plots
   plot_list <- lapply(names(results_list), function(condition) {
-    unique_genes <- unlist(unique_genes_list)  # Fetch unique genes for each condition
+    unique_genes <- unlist(unique_genes_list)  
+    # Fetch unique genes, as they are all unique, you can overlay them all, the ones 
     process_result(condition, unique_genes)
   })
   
@@ -737,6 +805,7 @@ generate_volcano_plots_mark_unique <- function(results_list,
       save_ggplot_formats(
         plt = combined_plot,
         base_plot_dir = plots_folder,
+        create_plot_subdir = TRUE,
         plt_name = glue("{filename_prefix}_Combined_Volcano_Layout_marked_{i}"),
         width = current_layout$width,
         height = current_layout$height
@@ -767,4 +836,64 @@ get_gene_description <- function(symbols) {
   
   # Return descriptions or "Unknown" for missing values
   sapply(symbols, function(sym) description_map[[sym]] %||% "Unknown")
+}
+
+list_stages <- function(){
+  conds <- unique(stage_lst)
+  m <- combn(conds, 2)
+  n = length(m)/2
+  lst <- vector("list", n)
+  for (i in 1:n){
+    lst[[i]] <- m[1:2, i]
+  }
+  return(lst)
+}
+
+generate_scrna_de_stage <- function(scrna, cluster_col = DEFAULT_CLUSTER_NAME, n_cores = 1) {
+  lst <- list_stages()  # should return list of c(stage1, stage2)
+  all_de_list <- mclapply(lst, function(ident.use) {
+    Idents(scrna) <- "stage"
+    logger.info("****processing %s vs %s", ident.use[1], ident.use[2])
+    
+    used_idents <- which(scrna$stage %in% ident.use)
+    a_sub <- subset(scrna, cells = used_idents)
+    Idents(a_sub) <- cluster_col
+    
+    de.list <- mclapply(unique(a_sub@meta.data[[cluster_col]]), function(cluster) {
+      logger.info("processing cluster %s", as.character(cluster))
+      
+      sub_idents <- which(a_sub@meta.data[[cluster_col]] == cluster)
+      if (length(sub_idents) == 0) {
+        return(NULL)
+      }
+      
+      a_sub.subset <- subset(a_sub, cells = sub_idents)
+      Idents(a_sub.subset) <- "stage"
+      
+      cluster.inside.de <- NULL
+      tryCatch({
+        cluster.inside.de <- RunPresto(a_sub.subset,
+                                       ident.1 = ident.use[1],
+                                       ident.2 = ident.use[2],
+                                       logfc.threshold = 0)
+        cluster.inside.de$gene <- rownames(cluster.inside.de)
+        cluster.inside.de$cluster <- cluster
+      }, error = function(cond) {
+        logger.warn(cond)
+        cluster.inside.de <- NULL
+      })
+      
+      return(cluster.inside.de)
+      
+    }, mc.cores = n_cores)
+    
+    # keep only non-empty
+    names(de.list) <- unique(a_sub@meta.data[[cluster_col]])
+    de.list <- de.list[!sapply(de.list, is.null)]
+    
+    return(de.list)
+  }, mc.cores = n_cores)
+  
+  names(all_de_list) <- sapply(lst, function(x) paste0(x[1], ".vs.", x[2]))
+  return(all_de_list)
 }
