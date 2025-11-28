@@ -1,0 +1,1106 @@
+---
+title: "Marker Gene and Proteomics Visualization"
+author: "Johannes Schöneich"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+library(ComplexHeatmap)
+library(circlize)
+library(DESeq2)
+library(tidyverse)
+library(openxlsx)
+```
+
+# 1. Load Data and Helper Functions
+
+```{r load-data}
+#harddrive <- "/media/johannes/EXTERNAL_USB/231248/NTFS_3.64TB"
+harddrive <- "H:/231248/NTFS_3.64TB"
+source(file.path(harddrive,"helper_functions.R"))
+
+# Bulk RNA-seq (uninfected)
+dds_fullsample <- readRDS(file.path(harddrive,
+                                    "RNA_seq/RNAseq_uninfected/dds_LRT_RNAseq_uninfected.Rds"))
+
+# Bulk RNA-seq (uninfected)
+dds_inf <- readRDS(file.path(harddrive,
+                                    "RNA_seq/RNAseq_infected/dds_LRT_RNAseq_infected.Rds"))
+
+# Crypt-villus RNA-seq
+dds_crypt_villus <- readRDS(file.path(harddrive,
+                                      "RNA_seq/RNAseq_crypt_villus/dds_LRT_group_RNAseq_crypt_villus.Rds"))
+
+# Promedi RNA-seq
+promedi <- readRDS(file.path(harddrive,
+                             "RNA_seq/RNAseq_promedi/dds_LRT_group_RNAseq_promedi.Rds"))
+
+# Proteomics
+proteomics <- read.csv(file.path(harddrive,
+                                 "DE_analysis/DE_Proteomics/charts/raw_data_protdf.csv"),
+                       row.names = 1)
+
+plots_folder <- file.path(harddrive,"marker_gene_analyses")
+dir.create(plots_folder)
+```
+
+# 2. Bulk RNA-seq: Selected Marker Genes
+
+```{r bulk-markers-heatmap}
+# Variance-stabilized counts
+vst_bulk <- assay(vst(dds_inf))
+
+# Genes of interest
+staining_markers <- c("Lct","Maf","Aoc1","Neu1" ,#Enterocyte
+              "Chga","Chgb","Neurod1","Cpe", #EEC
+              "Muc2","Defa24","Agr2","Ccl6", "Lyz1", #Goblet + Paneth
+              "Olfm4","Lgr5","Ascl2","Gkn3", #Stem,
+              "Mki67",
+              "Stmn1","Tubb5","Ube2c","Mybl2", #TA
+              "Avil")                        #Tuft
+
+mat <- vst_bulk[staining_markers, ]
+
+mat <- mat[,-grep("d05i",colnames(mat))]
+
+# Scale per gene (row)
+mat_scaled <- t(scale(t(mat)))
+
+# Heatmap
+marker_genes_heatmap_bulk <- Heatmap(mat_scaled,
+        name = "Expression (z-score)",
+        col = colorRamp2(c(-2,0,2), c("navy","white","firebrick3")),
+        row_names_gp = gpar(fontsize = 7),
+        row_names_side = "left",
+        column_names_gp = gpar(fontsize = 7),
+        heatmap_legend_param = list(title_gp = gpar(fontsize = 7), 
+                                    labels_gp = gpar(fontsize = 7),
+                                    legend_height = unit(4, "mm"),
+                                    legend_width = unit(18, "mm"),   # adjust width
+                                    direction = "horizontal",
+                                    title_position ="topleft"
+                                      ),
+        cluster_rows = FALSE,
+        cluster_columns = FALSE)
+
+marker_genes_heatmap_bulk <- draw(marker_genes_heatmap_bulk, heatmap_legend_side = "bottom", 
+    annotation_legend_side = "bottom")
+```
+
+```{r}
+# Variance-stabilized counts
+vst_cv <- assay(vst(dds_crypt_villus))
+mat <- vst_cv[staining_markers, ]
+
+# Scale per gene (row)
+mat_scaled <- t(scale(t(mat)))
+
+# --- Extract day and region from column names ---
+# Columns like "C01__1", "V05__3"
+day_region <- str_match(colnames(vst_cv), "^(C|V)(\\d{2})__")[,2:3]
+regions <- day_region[,1]   # "C" or "V"
+days <- day_region[,2]      # "01", "05", "10", "25"
+
+# --- Define desired orders ---
+region_levels <- c("C","V")       # crypt → villus
+day_levels <- c("01","05","10","25")
+
+# --- Ordering 1: Region only (crypt -> villus) ---
+col_order_region <- order(factor(regions, levels = region_levels))
+mat_scaled_region <- mat_scaled[, col_order_region]
+
+# --- Ordering 2: Day then region (01 C|V -> 05 C|V -> ...) ---
+col_order_day_region <- order(factor(days, levels = day_levels),
+                              factor(regions, levels = region_levels))
+mat_scaled_day_region <- mat_scaled[, col_order_day_region]
+
+# --- Example heatmaps ---
+
+# Region-only heatmap
+hm_scaled_region <- Heatmap(mat_scaled_region,
+        name = "Expression (z-score)",
+        col = colorRamp2(c(-2,0,2), c("navy","white","firebrick3")),
+        cluster_rows = FALSE,
+        cluster_columns = FALSE,
+        row_names_gp = gpar(fontsize = 7),
+        column_names_gp = gpar(fontsize = 7),
+        heatmap_legend_param = list(title_gp = gpar(fontsize = 7), 
+                                    labels_gp = gpar(fontsize = 7), 
+                                    legend_height = unit(4, "mm"), 
+                                    legend_width = unit(18, "mm") )
+        )
+
+# Day then region heatmap
+hm_scaled_day_region <- Heatmap(mat_scaled_day_region,
+        name = "Expression (z-score)",
+        col = colorRamp2(c(-2,0,2), c("navy","white","firebrick3")),
+        cluster_rows = FALSE,
+        cluster_columns = FALSE,
+        row_names_gp = gpar(fontsize = 7),
+        column_names_gp = gpar(fontsize = 7),
+        heatmap_legend_param = list(title_gp = gpar(fontsize = 7), 
+                                    labels_gp = gpar(fontsize = 7), 
+                                    legend_height = unit(4, "mm"), 
+                                    legend_width = unit(18, "mm") # adjust width direction = "horizontal", title_position ="topleft" )
+                                    )
+)
+
+marker_genes_heatmap_cv_region <- draw(hm_scaled_region, heatmap_legend_side = "bottom", 
+    annotation_legend_side = "bottom")
+
+marker_genes_heatmap_cv_day_region <- draw(hm_scaled_day_region, heatmap_legend_side = "bottom", 
+    annotation_legend_side = "bottom")
+```
+
+```{r bulk-markers-heatmap}
+save_ggplot_formats(
+    plt = marker_genes_heatmap_cv_region,
+    plot_obj = "heatmap",
+    base_plot_dir = plots_folder,
+    plt_name = "staining_marker_genes_heatmap_region",
+    width = 5, 
+    height = 4
+    )
+
+save_ggplot_formats(
+    plt = marker_genes_heatmap_cv_day_region,
+    plot_obj = "heatmap",
+    base_plot_dir = plots_folder,
+    plt_name = "staining_marker_genes_heatmap_day_region",
+    width = 5, 
+    height = 4
+    )
+```
+
+```{r}
+# Variance-stabilized counts
+vst_pmd <- assay(vst(promedi))
+mat <- vst_pmd[staining_markers, ]
+
+# Scale per gene (row)
+mat_scaled <- t(scale(t(mat)))
+
+# Heatmap
+marker_genes_heatmap_pmd <- Heatmap(mat_scaled,
+        name = "Expression (z-score)",
+        col = colorRamp2(c(-2,0,2), c("navy","white","firebrick3")),
+        row_names_gp = gpar(fontsize = 7),
+        row_names_side = "left",
+        column_names_gp = gpar(fontsize = 7),
+        heatmap_legend_param = list(title_gp = gpar(fontsize = 7), 
+                                    labels_gp = gpar(fontsize = 7),
+                                    legend_height = unit(4, "mm"),
+                                    legend_width = unit(18, "mm"),   # adjust width
+                                    direction = "horizontal",
+                                    title_position ="topleft"
+                                      ),
+        cluster_rows = FALSE,
+        cluster_columns = FALSE)
+
+marker_genes_heatmap_pmd <- draw(marker_genes_heatmap_pmd, heatmap_legend_side = "bottom", 
+    annotation_legend_side = "bottom")
+```
+
+```{r}
+day_region <- str_match(colnames(vst_pmd), "^(pro|med|dis)_(d\\d+)_")[,2:3]
+regions <- day_region[,1]
+days <- day_region[,2]
+
+# --- Define desired orders ---
+region_levels <- c("pro","med","dis")
+day_levels <- c("d01","d05","d10","d25")
+
+# --- Ordering 1: Region only (pro -> med -> dis) ---
+col_order_region <- order(factor(regions, levels = region_levels))
+mat_scaled_region <- mat_scaled[, col_order_region]
+
+# --- Ordering 2: Day then region (d01 pro|med|dis -> d05 pro|med|dis ...) ---
+col_order_day_region <- order(factor(days, levels = day_levels),
+                              factor(regions, levels = region_levels))
+mat_scaled_day_region <- mat_scaled[, col_order_day_region]
+
+# --- Example usage with ComplexHeatmap ---
+library(ComplexHeatmap)
+
+hm_scaled_region <- Heatmap(mat_scaled_region,
+        name = "Expression (z-score)",
+        col = colorRamp2(c(-2,0,2), c("navy","white","firebrick3")),
+        cluster_rows = FALSE,
+        cluster_columns = FALSE,
+           heatmap_legend_param = list(title_gp = gpar(fontsize = 7), 
+                                    labels_gp = gpar(fontsize = 7),
+                                    legend_height = unit(4, "mm"),
+                                    legend_width = unit(18, "mm"),   # adjust width
+                                    direction = "horizontal",
+                                    title_position ="topleft"
+                                      ),
+        show_row_names = TRUE,
+        show_column_names = TRUE)
+
+hm_scaled_day_region <- Heatmap(mat_scaled_day_region,
+        name = "Expression (z-score)",
+        col = colorRamp2(c(-2,0,2), c("navy","white","firebrick3")),
+        cluster_rows = FALSE,
+        cluster_columns = FALSE,
+           heatmap_legend_param = list(title_gp = gpar(fontsize = 7), 
+                                    labels_gp = gpar(fontsize = 7),
+                                    legend_height = unit(4, "mm"),
+                                    legend_width = unit(18, "mm"),   # adjust width
+                                    direction = "horizontal",
+                                    title_position ="topleft"
+                                      ),
+        show_row_names = TRUE,
+        show_column_names = TRUE)
+
+marker_genes_heatmap_pmd_region <- draw(hm_scaled_region, heatmap_legend_side = "bottom", 
+    annotation_legend_side = "bottom")
+
+marker_genes_heatmap_pmd_day_region <- draw(hm_scaled_day_region, heatmap_legend_side = "bottom", 
+    annotation_legend_side = "bottom")
+```
+
+```{r}
+
+save_ggplot_formats(
+    plt = marker_genes_heatmap_pmd_region,
+    plot_obj = "heatmap",
+    base_plot_dir = plots_folder,
+    plt_name = "staining_marker_genes_heatmap_pmd_region",
+    width = 6, 
+    height = 5
+    )
+
+save_ggplot_formats(
+    plt = marker_genes_heatmap_pmd_day_region,
+    plot_obj = "heatmap",
+    base_plot_dir = plots_folder,
+    plt_name = "staining_marker_genes_heatmap_day_pmd_region",
+    width = 6, 
+    height = 5
+    )
+```
+
+
+# 3. Bulk RNA-seq: Tight Junction Genes Over Time
+
+```{r tight-junction-lines}
+counts_mat <- counts(dds_inf)
+counts_mat <- counts_mat[,grep("d05",colnames(counts_mat))]
+#counts_mat <- counts_mat[,-grep("d05i",colnames(counts_mat))]
+
+# define color palette
+plot_colors <- c(
+  "#FFC04D",
+  "orange2",
+  "darkorange2",
+  "#CC5500",
+  "#009E73", 
+  "#8CB2FF"
+)
+
+# extract log2 counts for relevant genes
+expr_long <- counts_mat %>%
+  as.data.frame() %>%
+  rownames_to_column("gene") %>%
+  filter(grepl("^(Cldn|Tjp|Ocln)", gene)) %>%
+  mutate(across(-gene, ~log2(.x))) %>%
+  pivot_longer(-gene, names_to = "sample", values_to = "log_expr") %>%
+  mutate(timepoint = sub("_.*", "", sample))
+
+# map genes to groups directly (no repeated grepl)
+group_map <- list(
+  Cldn_group1 = c("Cldn1", "Cldn5"),
+  Cldn_group2 = c("Cldn19", "Cldn8", "Cldn2"),
+  Cldn_group3 = c("Cldn3", "Cldn15", "Cldn7")
+)
+
+expr_long <- expr_long %>%
+  mutate(group = case_when(
+    grepl("^Ocln", gene, ignore.case = TRUE) ~ "Ocln",
+    grepl("^Tjp", gene, ignore.case = TRUE) ~ "Tjp",
+    gene %in% group_map$Cldn_group1 ~ "Cldn group 1",
+    gene %in% group_map$Cldn_group2 ~ "Cldn group 2",
+    gene %in% group_map$Cldn_group3 ~ "Cldn group 3",
+    grepl("^Cldn", gene) ~ "Cldn group 4",
+    TRUE ~ "Other"
+  ))
+
+# compute medians per gene × timepoint
+median_expr <- expr_long %>%
+  group_by(timepoint, gene, group) %>%
+  summarise(median_log_expr = median(log_expr, na.rm = TRUE), .groups = "drop") %>%
+  mutate(timepoint = factor(timepoint, levels = c("d01","d05","d10","d25")))
+#  mutate(timepoint = factor(timepoint, levels = c("d05","d05i")))
+
+# color mapping
+color_map <- c(
+  "Cldn group 1" = plot_colors[2],
+  "Cldn group 2" = plot_colors[3],
+  "Cldn group 3" = plot_colors[4],
+  "Cldn group 4" = plot_colors[1],
+  "Ocln" = plot_colors[5],
+  "Tjp" = plot_colors[6]
+)
+```
+
+
+```{r tight-junction-lines}
+# plot
+tj_over_time <- ggplot(median_expr, aes(x = timepoint, 
+                                        y = median_log_expr, 
+                                        group = gene, 
+                                        color = group)) +
+  geom_line(linewidth = 0.25) +
+  geom_point(size = 0.25) +
+  scale_color_manual(values = color_map, name = "Gene group") +
+  theme_minimal(base_size = 7) + 
+  theme(axis.text = element_text(colour = "black"),
+        legend.key.spacing = unit(0.00001, 'cm') ) +
+  labs(
+    x = "Timepoint",
+    y = "Median log2(Expression)",
+    title = "Tight junction gene expression over time"
+  )
+
+  save_ggplot_formats(
+    plt = tj_over_time,
+    base_plot_dir = plots_folder,
+    plt_name = "tight_junction_markers_inf_colors",
+    width = 4, 
+    height = 2
+    )
+```
+
+```{r tight-junction-lines}
+write.xlsx(log_counts,file.path(plots_folder,"log_counts_amp_genes.xlsx"),row.names=TRUE)
+write.xlsx(tight_genes,file.path(plots_folder,"counts_amp_genes.xlsx"),row.names=TRUE)
+```
+
+#amp over time
+
+```{r}
+
+amp_colors <- c(
+  "#FFC04D",
+  "orange2",
+  "darkorange2", 
+  "#009E73", 
+  "#8CB2FF"
+)
+                     
+counts_mat <- counts(dds_inf)
+counts_mat <- counts_mat[,grep("d05",colnames(counts_mat))]
+#counts_mat <- counts_mat[,-grep("d05i",colnames(counts_mat))]
+
+# extract relevant genes (Reg3, Defa, Camp)
+expr_long <- counts_mat %>%
+  as.data.frame() %>%
+  rownames_to_column("gene") %>%
+  filter(grepl("^(Reg3[a-g]|Defa|Camp)", gene)) %>%
+  mutate(across(-gene, ~log2(.x + 1))) %>%
+  pivot_longer(-gene, names_to = "sample", values_to = "log_expr") %>%
+  mutate(timepoint = sub("_.*", "", sample))
+
+# assign gene groups
+expr_long <- expr_long %>%
+  mutate(group = case_when(
+    grepl("^Reg3[a-g]", gene, ignore.case = TRUE) ~ "Reg3",           # blue
+    grepl("^Camp", gene, ignore.case = TRUE) ~ "Camp",                 # green
+    gene %in% c("Defa24", "Defa17", "Defa3") ~ "Defa group 1",         # orange1
+    gene %in% c("Defa39", "Defa29", "Defa-ps10", "Defa-ps17") ~ "Defa group 2", # orange2
+    grepl("^Defa", gene, ignore.case = TRUE) ~ "Defa group 3",          # orange3
+    TRUE ~ "Other"
+  ))
+
+desired_levels <- c("Defa group 3","Defa group 1","Defa group 2","Camp","Reg3")
+
+median_expr <- expr_long %>%
+  group_by(timepoint, gene, group) %>%
+  summarise(median_log_expr = median(log_expr, na.rm = TRUE), .groups = "drop") %>%
+  mutate(timepoint = factor(timepoint, levels = c("d01","d05","d10","d25")),
+         group = factor(group, levels = desired_levels)) %>%
+  arrange(match(as.character(group), desired_levels), gene, timepoint)
+
+
+# define color mapping
+color_map <- c(
+  "Defa group 3" = amp_colors[1],
+  "Defa group 1" = amp_colors[2],
+  "Defa group 2" = amp_colors[3],
+  "Camp" = amp_colors[4],
+  "Reg3" = amp_colors[5]
+)
+
+# plot
+amp_markers <- ggplot(median_expr, aes(x = timepoint,
+                                       y = median_log_expr, 
+                                       group = gene, 
+                                       color = group)) +
+  geom_line(linewidth = 0.25) +
+  geom_point(size = 0.25) +
+  scale_color_manual(values = color_map, name = "Gene group") +
+  theme_minimal(base_size = 7) +
+  theme(axis.text = element_text(colour = "black")) +
+  labs(
+    x = "Timepoint",
+    y = "Median log2(Expression)",
+    title = "Expression of amp over time"
+)
+
+save_ggplot_formats(
+    plt = amp_markers,
+    base_plot_dir = plots_folder,
+    plt_name = "amp_markers_inf_colors3",
+    width = 3, 
+    height = 1.5
+    )
+```
+
+```{r}
+amp_genes <- counts_mat[grepl("Reg3[abg]|Defa|Camp", rownames(counts_mat)), ]
+log_counts <- log2(amp_genes)
+#Defa24, Defa17 and Defa3 (group 1), Defa28, Defa29, Defa-ps10 and Defa-ps17 (group 2) and the rest of the genes belong to group 3.
+
+write.xlsx(log_counts,file.path(plots_folder,"log_counts_amp_genes.xlsx"),row.names=TRUE)
+write.xlsx(amp_genes,file.path(plots_folder,"counts_amp_genes.xlsx"),row.names=TRUE)
+```
+
+```{r}
+amp_markers <- ggplot() +
+  geom_line(data = filter(median_expr, group == "Defa group 3"),
+            aes(x = timepoint, y = median_log_expr, group = gene, color = group),
+            linewidth = 0.25) +
+  geom_line(data = filter(median_expr, group == "Defa group 1"),
+            aes(x = timepoint, y = median_log_expr, group = gene, color = group),
+            linewidth = 0.25) +
+  geom_line(data = filter(median_expr, group == "Defa group 2"),
+            aes(x = timepoint, y = median_log_expr, group = gene, color = group),
+            linewidth = 0.25) +
+  geom_line(data = filter(median_expr, group == "Camp"),
+            aes(x = timepoint, y = median_log_expr, group = gene, color = group),
+            linewidth = 0.25) +
+  geom_line(data = filter(median_expr, group == "Reg3"),
+            aes(x = timepoint, y = median_log_expr, group = gene, color = group),
+            linewidth = 0.25) +
+  geom_point(data = median_expr, aes(x = timepoint, y = median_log_expr,
+                                     group = gene, color = group),
+             size = 0.25) +
+   scale_color_manual(values = color_map, name = "Gene group") +
+  theme_minimal(base_size = 7) +
+  theme(axis.text = element_text(colour = "black")) +
+  labs(x = "Timepoint", y = "Median log2(Expression)", title = "Expression of amp over time")
+
+
+# plot
+tj_over_time <- ggplot() +
+  
+  geom_line(data = filter(median_expr, group == "Cldn group 4"),
+            aes(x = timepoint, y = median_log_expr, group = gene, color = group),
+            linewidth = 0.25) +
+  geom_line(data = filter(median_expr, group == "Cldn group 1"),
+            aes(x = timepoint, y = median_log_expr, group = gene, color = group),
+            linewidth = 0.25) +
+  geom_line(data = filter(median_expr, group == "Cldn group 2"),
+            aes(x = timepoint, y = median_log_expr, group = gene, color = group),
+            linewidth = 0.25) +
+  geom_line(data = filter(median_expr, group == "Cldn group 3"),
+            aes(x = timepoint, y = median_log_expr, group = gene, color = group),
+            linewidth = 0.25) +
+  geom_line(data = filter(median_expr, group == "Ocln"),
+            aes(x = timepoint, y = median_log_expr, group = gene, color = group),
+            linewidth = 0.25) +
+  geom_line(data = filter(median_expr, group == "Tjp"),
+            aes(x = timepoint, y = median_log_expr, group = gene, color = group),
+            linewidth = 0.25) +
+  geom_point(data = median_expr, aes(x = timepoint, y = median_log_expr,
+                                     group = gene, color = group),
+             size = 0.25) +
+  scale_color_manual(values = color_map, name = "Gene group") +
+  # scale_color_manual(values = color_map, name = "Gene group") +
+  theme_minimal(base_size = 7) + 
+  theme(axis.text = element_text(colour = "black"),
+        legend.key.spacing = unit(0.00001, 'cm') ) +
+  labs(
+    x = "Timepoint",
+    y = "Median log2(Expression)",
+    title = "Tight junction gene expression over time"
+  )
+```
+
+
+# 4. Crypt vs Villus EEC Marker Genes
+
+```{r}
+vst_crypt <- assay(vst(dds_crypt_villus))
+vst_promedi <- assay(vst(promedi))
+
+# Crypt-specific EEC genes (BMP-low zone)
+crypt_genes <- c(
+  "Gcg",      # GLP-1
+  "Tac1",     # Substance P
+  "Trpa1"     # Receptor enriched in crypt ECs
+)
+
+# Villus-specific EEC genes (BMP-high zone)
+villus_genes <- c(
+  "Sct",      # Secretin
+  "Tph1",     # Serotonin synthesis enzyme
+  "Nts",      # Neurotensin
+  "Pyy",      # Upregulated in villus L-cells
+  "Cck",      # Cholecystokinin
+  "Gip",      # Gastric inhibitory peptide
+  "Tbx3",     # Villus-enriched TF
+  "Id1", 
+  "Id2", 
+  "Id3"       # BMP target genes
+ )
+
+other <- c(
+ "Hhex",     # TF in Sst+ villus D-cells
+  "Asic5",    # Acid-sensing receptor in D-cells
+  "Iapp"      # Amylin (villus D-cells)
+)
+#K-cells are enriched in the proximal and L-cells in the distal part of the SI respectively
+
+medial_crypt <- c("Tac1","Trpa1")
+
+distal_crypt <- "Gcg"
+
+proximal_villus <- c("Sct","Pyy")
+
+distal_villus <- c("Sct","Nts","Pyy") #rerun with only specific genes for promedi
+
+#TODO: only their promedi 
+promedi_genes <- unique(c(medial_crypt,distal_crypt,proximal_villus,distal_villus))
+
+plot_eec_heatmap <- function(mat, 
+                             crypt_genes, villus_genes,
+                             col_split_patterns = NULL,       # e.g. timepoints
+                             col_suborder_patterns = NULL,    # e.g. region order: 
+                             main_title = "",
+                             font_size = 7,
+                             zlim = c(-2,0,2),
+                             plots_folder = NULL,
+                             plt_height = 7,
+                             plt_width = 7) {
+  require(ComplexHeatmap)
+  require(circlize)
+  require(glue)
+  
+  # Select relevant genes
+  all_genes <- unique(c(crypt_genes, villus_genes))
+  mat <- mat[all_genes[all_genes %in% rownames(mat)], , drop = FALSE]
+  
+  # Scale per gene
+  mat_scaled <- t(scale(t(mat)))
+  
+  # ---- Optional reordering of columns by given suborder pattern ----
+ if (!is.null(col_suborder_patterns)) {
+  message("Applying sub-ordering within column groups...")
+
+  get_match <- function(patterns, x) {
+    mm <- sapply(patterns, function(p) grepl(p, x, ignore.case = TRUE))
+    if (is.null(dim(mm))) mm <- matrix(mm, ncol = 1)  # ensure matrix even for 1 pattern
+    colnames(mm) <- patterns
+    mm
+  }
+
+  # Build match matrices
+  sub_m <- get_match(col_suborder_patterns, colnames(mat_scaled))
+  split_m <- if (!is.null(col_split_patterns)) get_match(col_split_patterns, colnames(mat_scaled)) else NULL
+
+  # Determine first matching pattern per column
+  sub_hits <- apply(sub_m, 1, function(x) if (any(x)) col_suborder_patterns[which(x)[1]] else NA)
+  split_hits <- if (!is.null(split_m)) apply(split_m, 1, function(x) if (any(x)) col_split_patterns[which(x)[1]] else NA) else NA
+
+  # Assemble dataframe
+  col_info <- data.frame(
+    col = colnames(mat_scaled),
+    suborder = factor(sub_hits, levels = col_suborder_patterns),
+    split = if (!is.null(col_split_patterns)) factor(split_hits, levels = col_split_patterns) else NA,
+    stringsAsFactors = FALSE
+  )
+
+  # Order columns: split first (if available), then suborder, then name
+  ord <- order(col_info$split, col_info$suborder, col_info$col)
+  mat_scaled <- mat_scaled[, ord, drop = FALSE]
+}
+  
+  # ---- Row split factor ----
+  gene_type <- ifelse(rownames(mat_scaled) %in% crypt_genes, "Crypt", "Villus")
+  row_split_factor <- factor(gene_type, levels = c("Villus", "Crypt"))
+  
+  # ---- Column split factor (optional, for visual grouping) ----
+  if (!is.null(col_split_patterns)) {
+    col_type <- sapply(col_split_patterns, function(pat) {
+      ifelse(grepl(pat, colnames(mat_scaled), ignore.case = TRUE), pat, NA)
+    })
+    col_type <- apply(col_type, 1, function(x) na.omit(x)[1])
+    col_split_factor <- factor(col_type, levels = col_split_patterns)
+  } else {
+    col_split_factor <- NULL
+  }
+  
+  # ---- Plot heatmap ----
+  hm_plt <- Heatmap(mat_scaled,
+                    name = paste0("Expression (z-score)\n", main_title),
+                    col = colorRamp2(zlim, c("navy", "white", "firebrick3")),
+                    cluster_rows = TRUE,
+                    cluster_columns = FALSE,
+                    show_row_names = TRUE,
+                    show_column_names = TRUE,
+                    row_names_side = "left",
+                    row_dend_side = "right",
+                    row_dend_width = unit(5,"mm"),
+                    row_names_gp = gpar(fontsize = font_size),
+                    column_names_gp = gpar(fontsize = font_size),
+                    row_split = row_split_factor,
+                    column_split = col_split_factor,
+                    row_title_gp = gpar(fontsize = font_size),
+                    column_title_gp = gpar(fontsize = font_size),
+                    heatmap_legend_param = list(
+                      title_gp = gpar(fontsize = font_size),
+                      labels_gp = gpar(fontsize = font_size)
+                    )
+  )
+  
+  # ---- Save ----
+  save_ggplot_formats(
+    plt = hm_plt,
+    plot_obj = "heatmap",
+    plt_name = paste0("eec_heatmap_", main_title),
+    base_plot_dir = plots_folder,
+    height = plt_height,
+    width = plt_width
+  )
+  
+  return(hm_plt)
+}
+
+# Bulk heatmap
+plot_eec_heatmap(vst_bulk,
+                 col_split_patterns = NULL,
+                 crypt_genes = crypt_genes,
+                 villus_genes = villus_genes,
+                 plots_folder = plots_folder,
+                 main_title = "Bulk2",
+                 plt_height = 2,
+                 plt_width = 3.2)
+
+colnames(vst_crypt) <- gsub(
+  pattern = "^([CV])([0-9]+)__([0-9]+)$",
+  replacement = "\\1_d\\2_\\3",
+  x = colnames(vst_crypt)
+)
+
+# Crypt-villus heatmap
+plot_eec_heatmap(vst_crypt,
+                 crypt_genes = crypt_genes,
+                 villus_genes = villus_genes,
+                 col_split_patterns = c("d01","d05","d10","d25"),
+                 col_suborder_patterns = c("C","V"),
+                 plots_folder = plots_folder,
+                 main_title = "Crypt-Villus_daywise",
+                 plt_height = 2,
+                 plt_width = 4.2)
+
+plot_eec_heatmap(vst_promedi,
+                 crypt_genes = crypt_genes,
+                 villus_genes = villus_genes,
+                 col_split_patterns = c("d01","d05","d10","d25"),
+                 col_suborder_patterns = c("pro","med","dis"),
+                 plots_folder = plots_folder,
+                 main_title = "Promedi_daywise",
+                 plt_height = 2,
+                 plt_width = 5.2)
+```
+
+```{r}
+#manco paper
+
+manco_sup1 <- getsheets(file.path(harddrive,"villus_zonation/manco/supl_tbl_1.xlsx"),startrow = 2)
+  
+#this table needs expression above 5 × 10−5 and q-value < 0.25
+manco_sup3 <- getsheets(file.path(harddrive,"villus_zonation/manco/supl_tbl_3.xlsx"),startrow = 2)
+
+manco_gob_crypt_genes = manco_sup1$Goblet %>% 
+  filter(land.mark.type == "Crypt") %>%
+  pull(gene.name)
+
+manco_gob_villus_genes = manco_sup1$Goblet %>% 
+  filter(land.mark.type != "Crypt") %>%
+  pull(gene.name)
+
+plot_eec_heatmap(vst_crypt,
+                 crypt_genes = manco_gob_crypt_genes,
+                 villus_genes = manco_gob_villus_genes,
+                 col_split_patterns = c("d01","d05","d10","d25"),
+                 col_suborder_patterns = c("C","V"),
+                 plots_folder = plots_folder,
+                 main_title = "Crypt-Villus_manco_sup1_goblet_daywise",
+                 plt_height = 4,
+                 plt_width = 4.2)
+
+manco_eec_crypt_genes <- manco_sup1$Enteroendocrine %>%
+  filter(land.mark.type == "Crypt") %>%
+  pull(gene.name)
+manco_eec_villus_genes <- manco_sup1$Enteroendocrine %>%
+  filter(land.mark.type != "Crypt") %>%
+  pull(gene.name)
+
+plot_eec_heatmap(vst_crypt,
+                 crypt_genes = manco_eec_crypt_genes,
+                 villus_genes = manco_eec_villus_genes,
+                 col_split_patterns = c("d01","d05","d10","d25"),
+                 col_suborder_patterns = c("C","V"),
+                 plots_folder = plots_folder,
+                 main_title = "Crypt-Villus_manco_sup1_eec_daywise",
+                 plt_height = 4,
+                 plt_width = 4.2)
+
+```
+
+```{r}
+manco_sup3_filter <- lapply(manco_sup3,function(df){df %>%
+  select(Gene_Name, starts_with("Expression_Zone_"), q_value) %>% 
+  filter(q_value < 0.25,
+    pmax(!!!select(., starts_with("Expression_Zone_"))) > 5e-5
+    )
+  }
+)
+
+manco_markers.lists <- lapply(manco_sup3_filter, function(df) {
+  df %>%
+    select(Gene_Name, starts_with("Expression_Zone_")) %>%
+    pivot_longer(
+      cols = starts_with("Expression_Zone_"),
+      names_to = "Zone",
+      values_to = "Expression"
+    ) %>%
+    filter(Expression > 5e-6) %>%
+    group_by(Zone) %>%
+    summarise(Genes = list(unique(Gene_Name)), .groups = "drop") %>%
+    # Convert tibble to a named list per zone
+    deframe()
+})
+
+# give the module names
+gene_to_module <- bind_rows(
+  lapply(names(manco_markers.lists$Goblet), function(mod) {
+    genes <- manco_markers.lists$Goblet[[mod]]
+    # ensure character, drop NA
+    genes <- as.character(na.omit(genes))
+    data.frame(gene = genes, module = mod, stringsAsFactors = FALSE)
+  })
+)
+
+# Keep only genes present in the expression matrix
+gene_to_module <- gene_to_module %>% filter(gene %in% rownames(vst_crypt))
+
+# Subset expression matrix and order columns
+vst_sub <- vst_crypt[gene_to_module$gene,]
+
+# Z-score per gene (row)
+vst_z <- t(scale(t(vst_sub)))
+
+# Ensure gene_to_module rows follow the matrix row order
+gene_to_module <- gene_to_module[match(rownames(vst_z), gene_to_module$gene), ]
+
+colnames_sorted <- colnames(vst_z)[order(
+  as.numeric(sub("^[CV](\\d+).*", "\\1", colnames(vst_z))),  # numeric time
+  sub("^(C|V).*", "\\1", colnames(vst_z))                    # C before V
+)]
+
+col_split <- factor(
+  paste0("d", sub("^[CV](\\d+).*", "\\1", colnames_sorted)),
+  levels = c("d01", "d05", "d10", "d25")
+)
+
+vst_z <- vst_z[,colnames_sorted]
+
+# --- Plot heatmap with each sublist/module as separate chunk ---
+hm_cv_gob <- Heatmap(
+  vst_z,
+  name = "z-score",
+  cluster_rows = TRUE,
+  cluster_row_slices = FALSE,
+  cluster_columns = FALSE,
+  show_row_names = FALSE,
+  show_column_names = TRUE,
+  row_split = factor(gene_to_module$module, levels =
+                       names(manco_markers.lists$Goblet)),
+  column_split = col_split,
+  row_title_side = "right",
+  row_title_rot = 0,
+  row_title_gp = gpar(fontsize = 7),
+  column_title_gp = gpar(fontsize = 7),
+  column_names_gp = gpar(fontsize = 7),
+  border = TRUE,
+  row_dend_width = unit(6, "mm"),
+  heatmap_legend_param = list(title = "z-score",
+                              labels_gp = gpar(fontsize = 7),
+                              title_gp = gpar(fontsize = 7, fontface = "bold")
+  )
+)
+
+save_ggplot_formats(
+  plt = hm_cv_gob,
+  plot_obj = "heatmap",
+  base_plot_dir = plots_folder,
+  plt_name = "manco_goblet_cv_genewise_small2",
+  width = 2.5, 
+  height = 4
+)
+```
+
+# 5. Proteomics: Pancreatic Genes
+
+```{r proteomics-pancreas}
+trypsin_genes <- c("Prss1","Prss2","Prss3")
+
+lipase_genes <- c("Pnlip","Pnliprp1","Pnliprp2")
+
+amylase_genes <- c("Amy2a1","Amy2a2")
+
+all_pancreatic <- c(trypsin_genes, lipase_genes, amylase_genes)
+all_pancreatic_prot <- all_pancreatic[all_pancreatic %in% rownames(proteomics)]
+
+expr_long <- proteomics[all_pancreatic_prot,] %>%
+  as.data.frame() %>%
+  rownames_to_column("gene") %>%
+  pivot_longer(-gene, names_to = "sample", values_to = "log_expr") %>%
+  mutate(timepoint = sub("_.*", "", sample),
+         category = case_when(
+           grepl("^Prss", gene) ~ "Trypsin",
+           grepl("^Pnlip", gene) ~ "Lipases",
+           grepl("^Amy", gene)  ~ "Amylase",
+           TRUE ~ "Other"
+         ))
+
+expr_long$timepoint <- factor(expr_long$timepoint, levels = c("d01","d05","d10","d25"))
+
+median_expr <- expr_long %>%
+  group_by(timepoint, gene, category) %>%
+  summarise(median_log_expr = median(log_expr, na.rm = TRUE), .groups = "drop")
+
+panc_plot <- ggplot(median_expr, aes(x = timepoint, y = median_log_expr, group = gene, color = gene)) +
+  geom_line(size = 0.25) + geom_point(size = 0.25) +
+  theme_minimal(base_size = 7) +
+  labs(title = "Pancreatic Proteins Across Timepoints",
+       x = "Timepoint", y = "Median log2 Expression", color = "Gene")
+
+  save_ggplot_formats(
+    plt = panc_plot,
+    base_plot_dir = plots_folder,
+    plt_name = "pancreatic_gene_in_proteomics_line",
+    width = 3, 
+    height = 1.5
+    )
+```
+
+
+```{r}
+trypsin_genes <- c("Prss1","Prss2","Prss3")
+
+lipase_genes <- c("Pnlip","Pnliprp1","Pnliprp2")
+
+amylase_genes <- c("Amy2a1","Amy2a2")
+
+all_pancreatic <- c(trypsin_genes, lipase_genes, amylase_genes)
+all_pancreatic_prot <- all_pancreatic[all_pancreatic %in% rownames(counts_mat)]
+
+log_counts <- 
+
+expr_long <- log_counts[all_pancreatic_prot,] %>%
+  as.data.frame() %>%
+  rownames_to_column("gene") %>%
+  pivot_longer(-gene, names_to = "sample", values_to = "log_expr") %>%
+  mutate(timepoint = sub("_.*", "", sample),
+         category = case_when(
+           grepl("^Prss", gene) ~ "Trypsin",
+           grepl("^Pnlip", gene) ~ "Lipases",
+           grepl("^Amy", gene)  ~ "Amylase",
+           TRUE ~ "Other"
+         ))
+
+expr_long$timepoint <- factor(expr_long$timepoint, levels = c("d01","d05","d10","d25"))
+
+median_expr <- expr_long %>%
+  group_by(timepoint, gene, category) %>%
+  summarise(median_log_expr = median(log_expr, na.rm = TRUE), .groups = "drop")
+
+panc_plot <- ggplot(median_expr, aes(x = timepoint, y = median_log_expr, group = gene, color = gene)) +
+  geom_line(size = 0.25) + geom_point(size = 0.25) +
+  theme_minimal(base_size = 7) +
+  labs(title = "Pancreatic genes Across Timepoints bulk",
+       x = "Timepoint", y = "Median log2 Expression", color = "Gene")
+
+  save_ggplot_formats(
+    plt = panc_plot,
+    base_plot_dir = plots_folder,
+    plt_name = "pancreatic_gene_in_bulk_line",
+    width = 3, 
+    height = 1.5
+    )
+```
+
+
+# 6. Proteomics Heatmap
+
+```{r proteomics-heatmap}
+log2_scaled <- t(scale(t(proteomics[all_pancreatic_prot,])))
+
+panc_heatmap <- Heatmap(log2_scaled,
+        name = "Z-score",
+        col = colorRamp2(c(-2, 0, 2), c("navy", "white", "firebrick3")),
+        cluster_rows = FALSE,
+        cluster_columns = FALSE,
+        show_row_names = TRUE,
+        show_column_names = TRUE,
+        row_names_side = "left",
+        row_names_gp = gpar(fontsize = 7),
+        column_names_gp = gpar(fontsize = 7),
+                heatmap_legend_param = list(title_gp = gpar(fontsize = 7), 
+                                    labels_gp = gpar(fontsize = 7),
+                                    legend_height = unit(4, "mm"),
+                                    legend_width = unit(18, "mm"),   # adjust width
+                                    direction = "horizontal",
+                                    title_position ="topleft"
+                                      )
+        )
+
+panc_heatmap <- draw(panc_heatmap, heatmap_legend_side = "bottom", 
+    annotation_legend_side = "bottom")
+
+save_ggplot_formats(
+    plt = panc_heatmap,
+    plot_obj = "heatmap",
+    base_plot_dir = plots_folder,
+    plt_name = "pancreas_genes_heatmap_proteomics",
+    width = 4, 
+    height = 2
+    )
+
+
+staining_markers_prot <- staining_markers[staining_markers %in% rownames(proteomics)]
+
+marker_genes_prot <- t(scale(t(proteomics[staining_markers_prot,])))
+
+staining_heatmap <- Heatmap(marker_genes_prot,
+        name = "Z-score",
+        col = colorRamp2(c(-2, 0, 2), c("navy", "white", "firebrick3")),
+        cluster_rows = FALSE,
+        cluster_columns = FALSE,
+        show_row_names = TRUE,
+        show_column_names = TRUE,
+        row_names_side = "left",
+        row_names_gp = gpar(fontsize = 7),
+        column_names_gp = gpar(fontsize = 7),
+                heatmap_legend_param = list(title_gp = gpar(fontsize = 7), 
+                                    labels_gp = gpar(fontsize = 7),
+                                    legend_height = unit(4, "mm"),
+                                    legend_width = unit(18, "mm"),   # adjust width
+                                    direction = "horizontal",
+                                    title_position = "topleft"
+                                      )
+        )
+
+
+save_ggplot_formats(
+    plt = staining_heatmap,
+    plot_obj = "heatmap",
+    base_plot_dir = plots_folder,
+    plt_name = "staining_marker_genes_heatmap_prot_with_lyz1",
+    width = 3, 
+    height = 2
+    )
+```
+
+```{r}
+tight_prots <- proteomics[grepl("Cldn|Tjp|Ocln", rownames(proteomics)), ]
+write.xlsx(tight_prots,file.path(plots_folder,"log2_tj_proteomics.xlsx"),row.names = TRUE)
+
+expr_long <- tight_prots %>%
+  as.data.frame() %>%
+  rownames_to_column("gene") %>%
+  pivot_longer(-gene, names_to = "sample", values_to = "log_expr") %>%
+  mutate(timepoint = sub("_.*", "", sample),
+         category = case_when(
+           grepl("^Cldn", gene) ~ "Cldn",
+           grepl("^Tjp", gene)  ~ "Tjp",
+           grepl("^Ocln", gene) ~ "Ocln",
+           TRUE ~ "Other"
+         ))
+
+expr_long$timepoint <- factor(expr_long$timepoint, levels = c("d01","d05","d10","d25"))
+
+median_expr <- expr_long %>%
+  group_by(timepoint, gene, category) %>%
+  summarise(median_log_expr = median(log_expr, na.rm = TRUE), .groups = "drop")
+
+tj_over_time <- ggplot(median_expr, aes(x = timepoint, 
+                                        y = median_log_expr, 
+                                        group = gene, 
+                                        color = category)) + 
+  geom_line(size = 0.25) + geom_point(size = 0.25) +
+  theme_minimal(base_size = 7) +
+  labs(title = "Tight-junction genes over time",
+       x = "Timepoint", y = "Median log2 Expression", color = "Gene family") + 
+  theme(axis.text = element_text(colour = "black"))
+
+  save_ggplot_formats(
+    plt = tj_over_time,
+    base_plot_dir = plots_folder,
+    plt_name = "tight_junction_markers_prot",
+    width = 3, 
+    height = 1.5
+    )
+  
+```
+
+
+```{r}
+amp_prots <- proteomics[grepl("Reg3[abg]|Defa|Camp", rownames(proteomics)), ]
+
+write.xlsx(amp_prots,file.path(plots_folder,"log2_amp_proteomics.xlsx"),row.names = TRUE)
+
+expr_long <- amp_prots %>%
+  as.data.frame() %>%
+  rownames_to_column("gene") %>%
+  pivot_longer(-gene, names_to = "sample", values_to = "log_expr") %>%
+  mutate(timepoint = sub("_.*", "", sample),
+         category = case_when(
+           grepl("^Reg3", gene) ~ "Reg3g",
+           grepl("Defa", gene) ~ "Defensins",
+           grepl("^Camp", gene) ~ "Camp",
+           TRUE ~ "Other"
+         ))
+# 
+expr_long$timepoint <- factor(expr_long$timepoint, levels = c("d01","d05","d10","d25"))
+
+#expr_long$timepoint <- factor(expr_long$timepoint, levels = c("d05","d05i"))
+
+
+median_expr <- expr_long %>%
+  group_by(timepoint, gene, category) %>%
+  summarise(median_log_expr = median(log_expr, na.rm = TRUE), .groups = "drop")
+
+amp_over_time <- ggplot(median_expr, aes(x = timepoint, y = median_log_expr, 
+                                 group = gene, color = category)) +
+  geom_line(size = 0.25) + geom_point(size = 0.25) +
+  theme_minimal(base_size = 7) +
+  labs(title = "Antimicrobial peptides over time",
+       x = "Timepoint", y = "Median log2 Expression", color = "Gene family") + 
+  theme(axis.text = element_text(colour = "black"))
+
+  save_ggplot_formats(
+    plt = amp_over_time,
+    base_plot_dir = plots_folder,
+    plt_name = "antimicrobial_peptides_in_proteomics",
+    width = 3, 
+    height = 1.5
+    )
+```
+
