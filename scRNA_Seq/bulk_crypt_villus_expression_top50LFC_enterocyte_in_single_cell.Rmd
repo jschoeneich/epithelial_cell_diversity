@@ -19,6 +19,7 @@ library(scales)
 library(cowplot)
 library(gridExtra)
 library(patchwork)
+library(scCustomize)
 ```
 
 ```{r}
@@ -27,7 +28,7 @@ library(patchwork)
 # first of all we are going to overlap bulk days. We compare always vs the extremes.
 # d1/5/10 vs 25 and 25 vs 1.
 
-harddrive <- "H:"
+harddrive <- "D:/231248/NTFS_3.64TB" 
 
 source(file.path(harddrive,"helper_functions.R"))
 source(file.path(harddrive,"aggregate_expression_functions.R"))
@@ -40,11 +41,11 @@ l2fc.cutoff <- 1
 p.cutoff <- 0.05
 
 analysis_folder <- file.path(harddrive,
-                          "scrna_datasets/scrna_both_d25/scrna_full_2024_both_d25_ent_v2")
+ "scrna_datasets/scrna_both_d25/scrna_full_2024_both_d25_ent_v2")
 
 plots_folder <- file.path(harddrive,"plots/")
 
-analysis_name <- "crypt_villus_eec"
+analysis_name <- "crypt_villus_ent_noc2_no11"
 
 inf_cols <- c("#E08B00","#5BB300","#00C0AF","#7997FF","#FF61C9")
 uninf_cols  <- c("#E08B00","#5BB300","#7997FF","#FF61C9")
@@ -121,15 +122,20 @@ results.list.bulk.prepo <- readRDS(file.path(de_path,
                              "DE_LRT_uninfected_pre-weaning_post-weaning/",
                              "DE_results.list_pre-weaning_post-weaning_edit.Rds"))
 
-names(results.list.bulk.prepo) <- make.names(names(results.list.bulk.prepo))
+names(results.list.bulk.prepo) <- 
+  make.names(names(results.list.bulk.prepo))
 
-results.list.villi.age <- readRDS(file.path(de_path,                                            "DE_LRT_crypt_villus_group/DE_results.list_group.Rds"))
+results.list.villi.age <- readRDS(file.path(de_path,"DE_LRT_crypt_villus_group/DE_results.list_group.Rds"))
 
 results.list.cv.prepo <- readRDS(file.path(de_path,
  "DE_LRT_crypt_villus_pre.weaning_post.weaning/DE_results.list_stage_area_edit.Rds"))
 
 names(results.list.cv.prepo) <- make.names(names(results.list.cv.prepo))
 
+results.list.cv.area <- readRDS(file.path(de_path,
+ "DE_LRT_crypt_villus/DE_results.list_area.Rds"))
+
+names(results.list.cv.area) <- make.names(names(results.list.cv.area))
 ```
 
 ```{r}
@@ -150,15 +156,24 @@ results.list.cv.prepo.filter <- lapply(results.list.cv.prepo,function(df){
                                (df$padj <= p.cutoff),])
   return(sigsdf)
 })
+
+results.list.cv.area.filter <- lapply(results.list.cv.area,function(df){
+  sigsdf <- as.data.frame(df[abs(df$log2FoldChange) >= l2fc.cutoff & 
+                               (df$padj <= p.cutoff),])
+  return(sigsdf)
+})
 ```
 
 ```{r}
 # Function to select top symbols (with overlap)
-selectTopSymbols <- function(results, scrna, l2fc.cutoff, direction, top_x){
+selectTopSymbols <- function(results, scrna,
+                             l2fc.cutoff, direction, top_x){
   
   filter_condition <- switch(direction,
-                             "up"   = results$log2FoldChange >= l2fc.cutoff,
-                             "down" = results$log2FoldChange <= -l2fc.cutoff,
+                             "up"   = 
+                               results$log2FoldChange >= l2fc.cutoff,
+                             "down" = 
+                               results$log2FoldChange <= -l2fc.cutoff,
                              stop("Invalid direction")
                              )
   #we need a check if its up or down because then the arrange 
@@ -202,21 +217,35 @@ DimPlot(scrna,reduction = "INTE_UMAP", split.by = cluster_use,
 # crypt-villus pre-post weaning
 ```{r}
 # Select top symbols without overlap for each dataset
+
+DE.crypts_filter <- selectTopSymbols(
+  results.list.cv.area.filter$crypts_villi, scrna, l2fc.cutoff, 
+  direction = "down", 50)
+
+
+DE.villi_filter <- selectTopSymbols(
+  results.list.cv.area.filter$crypts_villi, scrna, l2fc.cutoff, 
+  direction = "up", 50)
+
 preWe.crypts_filter <- selectTopSymbols(
   results.list.cv.prepo.filter$pre.weaning.crypts_pre.weaning.villi, 
-                                        scrna, l2fc.cutoff, direction = "down", 50)
+                                        scrna, l2fc.cutoff, 
+  direction = "down", 50)
 
 poWe.crypts_filter <- selectTopSymbols(
   results.list.cv.prepo.filter$post.weaning.crypts_post.weaning.villi, 
-                                       scrna, l2fc.cutoff, direction = "down", 50)
+                                       scrna, l2fc.cutoff, 
+  direction = "down", 50)
 
 preWe.villi_filter <- selectTopSymbols(
   results.list.cv.prepo.filter$pre.weaning.crypts_pre.weaning.villi, 
-                                       scrna, l2fc.cutoff, direction = "up", 50)
+                                       scrna, l2fc.cutoff, 
+  direction = "up", 50)
 
 poWe.villi_filter <- selectTopSymbols(
   results.list.cv.prepo.filter$post.weaning.crypts_post.weaning.villi, 
-                                       scrna, l2fc.cutoff, direction = "up", 50)
+                                       scrna, l2fc.cutoff,
+  direction = "up", 50)
 
 # Check for initial overlap
 initial_overlap <- intersect(preWe.crypts_filter, poWe.villi_filter)
@@ -234,7 +263,8 @@ poWe.crypts_filter <- setdiff(poWe.crypts_filter, initial_overlap2)
 ```{r}
 cv.list <- list(preWe.crypts_filter,poWe.crypts_filter,
                 preWe.villi_filter,poWe.villi_filter)
-names(cv.list) <- c("preWe.crypts","poWe.crypts","preWe.villi","poWe.villi")
+names(cv.list) <- c("preWe.crypts","poWe.crypts",
+                    "preWe.villi","poWe.villi")
 
 new.list <- lapply(cv.list,function(Symbol){
   Description <- mapIds(
@@ -248,22 +278,44 @@ new.list <- lapply(cv.list,function(Symbol){
 return(df)
 })
 
-#write.xlsx(new.list,file=file.path(harddrive,paste0(analysis_name,"_genes.xlsx"),
-#           rownames = FALSE)
+cv.new.list <- lapply(DE.crypts_filter,function(Symbol){
+  Description <- mapIds(
+    org.Mm.eg.db,
+    keys = Symbol,
+    column = "GENENAME",
+    keytype = "SYMBOL",
+    multiVals = "first"
+    )
+  df <- data.frame(Symbol,Description)
+return(df)
+})
+```
+
+
+```{r}
+write.xlsx(new.list,file =
+             file.path(harddrive,paste0(analysis_name,"_genes.xlsx")),
+          rownames = FALSE)
 ```
 
 ```{r}
 for(i in seq_along(cv.list)){
   day <- paste0("aggr.exp_cv_",names(cv.list)[i])
-  scrna <- get_aggregate_expression(object = scrna, cv.list[[i]], meta_name = day)
+  #scrna <- get_aggregate_expression(object = scrna, cv.list[[i]], meta_name = day)
+  scrna <- AddModuleScore(scrna, features = cv.list[i], name = day)
 }
+
+
+scrna <- AddModuleScore(scrna, features = list(DE.crypts_filter), 
+                        name = "all_crypts")
+
+scrna <- AddModuleScore(scrna, features = list(DE.villi_filter), 
+                        name = "all_villi")
 ```
 
 ```{r}
-# All plots separate
-plot_list <- list()
-
-all_days <- paste0("aggr.exp_cv_", names(cv.list))
+ # addModule always adds 1 to the end of the names
+all_days <- paste0("aggr.exp_cv_", names(cv.list),1)
 
 crypts <- all_days[grep("crypts",all_days)]
 villi <- all_days[grep("villi",all_days)]
@@ -278,7 +330,7 @@ p_crypts <- FeaturePlot(scrna,
             max.cutoff = "q95", 
             label = FALSE,
             order = TRUE,
-            col = c("lightgrey", "#F8766D"),
+            col = c("lightgrey", "red"),
             ncol = 2,
             slot = "scale.data",
             keep.scale="all",
@@ -292,18 +344,34 @@ p_villi <- FeaturePlot(scrna,
             max.cutoff = "q95", 
             label = FALSE,
             order = TRUE,
-            col = c("lightgrey", "#F8766D"),
+            col = c("lightgrey", "red"),
             ncol = 2,
             slot = "scale.data",
             keep.scale="all",
             combine = TRUE
             ) & mini_umap_theme & ggtitle(element_blank())
+
+p_villi <- FeaturePlot(scrna, 
+            features = c("all_crypts1","all_villi1"), 
+            reduction = "INTE_UMAP",
+            #min.cutoff = "q05",
+            max.cutoff = "q95", 
+            label = FALSE,
+            order = TRUE,
+            col = c("lightgrey", "red"),
+            ncol = 2,
+            slot = "scale.data",
+            #keep.scale = "all",
+            combine = TRUE
+            ) & mini_umap_theme & ggtitle(element_blank())
+
+
 ```
 
 ```{r}
 prWe_both_combined <- FeaturePlot(scrna, 
             features = preWe, 
-            reduction = "harmony_UMAP",
+            reduction = "INTE_UMAP",
             min.cutoff = "q05",
             max.cutoff = "q95", 
             label = FALSE,
@@ -311,7 +379,7 @@ prWe_both_combined <- FeaturePlot(scrna,
             col = c("lightgrey", "red"),
             ncol = 2,
             slot = "scale.data",
-            keep.scale="all",
+            #keep.scale="all",
             combine = TRUE
             )
 
@@ -327,7 +395,8 @@ prWe_pro_combined <- prWe_pro_combined + theme(legend.position = "none") + ggtit
 prWe_dis_combined <- prWe_dis_combined + theme(legend.position = "none") + ggtitle("villi")
 
 # Combined plot without the legend
-combined_plot <- (prWe_pro_combined + prWe_dis_combined) + plot_layout(ncol = 2)
+combined_plot <- (prWe_pro_combined + prWe_dis_combined) +
+  plot_layout(ncol = 2)
 
 # Create a text annotation as a plot element
 left_annotation <- wrap_elements(
@@ -345,13 +414,61 @@ final_plot <- left_annotation + combined_plot + legend +
 
 ```{r}
 
-plots_folder <- "H:/test"
+#plots_folder <- "H:/test"
 save_ggplot_formats(
             plt = final_plot ,
             base_plot_dir = plots_folder,
-            plt_name = paste0(analysis_name,"_prWe",cluster_use),
+            plt_name = paste0(analysis_name,"_prWe_noc2_no11",cluster_use),
             width = 7, height = 2.5
             )
+
+
+DefaultAssay(scrna) <- "MAGIC_RNA"
+
+fp_custom_crypt <- FeaturePlot_scCustom(scrna,
+                                         features = crypts, 
+                           reduction = "INTE_UMAP",
+                           pt.size = 5, 
+                           order = TRUE,
+                           #min.cutoff = "q05",
+                           max.cutoff = "q95",
+                           colors_use = viridis_inferno_light_high, 
+                           #keep.scale = "all",
+                           figure_plot = TRUE,
+                           na_cutoff = NULL,
+                           raster = TRUE
+)   & ggtitle(element_blank())
+
+
+fp_custom_villi <- FeaturePlot_scCustom(scrna, 
+                                  features = villi, 
+                                  reduction = "INTE_UMAP",
+                                  pt.size = 5, 
+                                  order = TRUE,
+                                  max.cutoff = "q95",
+                                  colors_use = viridis_inferno_light_high, 
+                                  #keep.scale = "all",
+                                  figure_plot = TRUE,
+                                  na_cutoff = NULL,
+                                  raster = TRUE
+)  & ggtitle(element_blank())
+
+
+fp_custom_full <- FeaturePlot_scCustom(scrna,
+                                       features = 
+                                         c("all_crypts1","all_villi1"), 
+                           reduction = "INTE_UMAP",
+                           pt.size = 5, 
+                           order = TRUE,
+                           #min.cutoff = "q05",
+                           max.cutoff = "q95",
+                           colors_use = viridis_inferno_light_high, 
+                           keep.scale = "all",
+                           figure_plot = TRUE,
+                           na_cutoff = NULL,
+                           raster = TRUE
+)   & ggtitle(element_blank())
+
 ```
 
 ```{r}
@@ -360,7 +477,20 @@ cv_grid <- p_crypts / p_villi
 save_ggplot_formats(
             plt = cv_grid ,
             base_plot_dir = plots_folder,
-            plt_name = paste0(analysis_name,"_fourplot_independent_scale_",cluster_use),
+            plt_name = paste0(analysis_name,
+                              "_fourplot_independent_scale_noc2_no11",
+                              cluster_use),
+            width = 7, height = 5
+            )
+
+cv_grid_viridis <- fp_custom_crypt / fp_custom_villi
+
+save_ggplot_formats(
+            plt = cv_grid_viridis ,
+            base_plot_dir = plots_folder,
+            plt_name = paste0(analysis_name,
+                              "_fourplot_independent_scale_viridis_noc2_no11",
+                              cluster_use),
             width = 7, height = 5
             )
 ```
@@ -398,6 +528,16 @@ save_ggplot_formats(
   plt_name = paste0(analysis_name,"_fourplot_vln_independent_scale_",cluster_use),
   width = 7, height = 5
 )
+```
+
+```{r}
+save_ggplot_formats(
+            plt = fp_custom_full ,
+            base_plot_dir = plots_folder,
+            plt_name = paste0(analysis_name,
+                              "_full_crypt_villus_uninf"),
+            width = 8, height = 4
+            )
 ```
 
 ```{r}

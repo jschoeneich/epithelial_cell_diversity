@@ -24,8 +24,10 @@ library(cowplot)
 library(gridExtra)
 library(patchwork)
 library(openxlsx)
+library(parallel)
+library(SeuratWrappers)
 
-harddrive <- "H:"
+harddrive <- "D:/231248/NTFS_3.64TB"
 
 source(file.path(harddrive,"save_load_helper.R"))
 source(file.path(harddrive,"helper_functions.R"))
@@ -34,20 +36,24 @@ source(file.path(harddrive,"scrna_datasets/single_cell_themes.R"))
 ```
 
 ```{r}
-tools <- load_object(file.path(harddrive,"scrna_datasets/scrna_both_d25/",
-                      "scrna_full_2024_both_d25_broad_inf/save/",
-                      "tools_scrna_broad_inf.Rds"))
+scrna_folder <- file.path(
+  harddrive,
+  "scrna_datasets/scrna_full_both_d25_mito_filter_inf",
+  "scrna_full_both_d25_mito100_inf"
+)
 
-analysis_folder <- "scrna_datasets/infected_d05"
+scrna_inf <- load_object(file.path(scrna_folder,"scrna_full_filtered_inf.Rds"))
 
-plots_folder <- file.path(harddrive,analysis_folder,"DE/plots")
-charts_folder <- file.path(harddrive,analysis_folder,"DE/charts")
+analysis_folder <- file.path(harddrive,"scrna_datasets/scrna_infected_d05_2025")
+
+plots_folder <- file.path(analysis_folder,"DE/plots")
+charts_folder <- file.path(analysis_folder,"DE/charts")
 
 GO_save_folder <- file.path(analysis_folder,
-                          "GO/saves/")
+                          "GO/saves")
 
 pathway_save_folder <- file.path(analysis_folder,
-                          "Pathway/saves/")
+                          "Pathway/saves")
 
 # Which ontology: choose between all, biological process (bp), 
 # molecular function (mf) and cellular component (cc).
@@ -80,10 +86,78 @@ dir.create(plots_folder,recursive = TRUE)
 dir.create(charts_folder,recursive = TRUE)
 dir.create(GO_save_folder,recursive = TRUE)
 dir.create(pathway_save_folder,recursive = TRUE)
+```
 
+```{r}
+list_stages <- function(){
+  conds <- unique(stage_lst)
+  m <- combn(conds, 2)
+  n = length(m)/2
+  lst <- vector("list", n)
+  for (i in 1:n){
+    lst[[i]] <- m[1:2, i]
+  }
+  return(lst)
+}
+
+generate_scrna_de_stage <- function(scrna, cluster_col, n_cores = 1) {
+  lst <- list_stages()  # should return list of c(stage1, stage2)
+  all_de_list <- mclapply(lst, function(ident.use) {
+    Idents(scrna) <- "stage"
+
+    used_idents <- which(scrna$stage %in% ident.use)
+    a_sub <- subset(scrna, cells = used_idents)
+    Idents(a_sub) <- cluster_col
+    
+    de.list <- mclapply(unique(a_sub@meta.data[[cluster_col]]), function(cluster) {
+
+      sub_idents <- which(a_sub@meta.data[[cluster_col]] == cluster)
+      if (length(sub_idents) == 0) {
+        return(NULL)
+      }
+      
+      a_sub.subset <- subset(a_sub, cells = sub_idents)
+      Idents(a_sub.subset) <- "stage"
+      
+      cluster.inside.de <- NULL
+      tryCatch({
+        cluster.inside.de <- RunPresto(a_sub.subset,
+                                       ident.1 = ident.use[1],
+                                       ident.2 = ident.use[2],
+                                       logfc.threshold = 0)
+        cluster.inside.de$gene <- rownames(cluster.inside.de)
+        cluster.inside.de$cluster <- cluster
+      }, error = function(cond) {
+        #logger.warn(cond)
+        cluster.inside.de <- NULL
+      })
+      
+      return(cluster.inside.de)
+      
+    }, mc.cores = n_cores)
+    
+    # keep only non-empty
+    names(de.list) <- unique(a_sub@meta.data[[cluster_col]])
+    de.list <- de.list[!sapply(de.list, is.null)]
+    
+    return(de.list)
+  }, mc.cores = n_cores)
+  
+  names(all_de_list) <- sapply(lst, function(x) paste0(x[1], ".vs.", x[2]))
+  return(all_de_list)
+}
+
+```
+
+
+```{r}
 # read in the results.list if this analysis was already run 
 # and you want to change plots
-results.list <- tools[["dego_name_int_0.3_broad"]]$de$d05.vs.d05i
+# 
+Idents(scrna_inf) <- "stage"
+stage_lst <- c("d05","d05i")
+
+all_de <- generate_scrna_de_stage(scrna_inf,cluster_col = "int_0.3_broad_TA")
 ```
 
 ## Volcano Plots DE genes
@@ -99,10 +173,11 @@ for example, if we observe a log2 fold change of -2 this would mean
 the gene expression is lower in the level of interest relative to the base level
 
 ```{r}
-#change logfc so that infected is right, uninfected left
-results.list <- lapply(results.list,
+#change logfc so that infected is right, uninfected left and use BH as padj method
+results.list <- lapply(all_de$d05.vs.d05i,
                        function(res){
                          res$avg_log2FC <- -res$avg_log2FC
+                         res$p_val_adj <- p.adjust(res$p_val, method = "BH")
                          return(res)
                          }
                        )
@@ -114,14 +189,15 @@ generate_volcano_plots(results_list = results.list,
                        neg_color = "#377EB8",
                        plots_folder = plots_folder,
                        charts_folder = charts_folder,
-                       filename_prefix = "Full")
+                       filename_prefix = "Full_v2",
+                       do_save = TRUE)
 ```
 
 ```{r}
 # unique DE genes for infection
 
 infected_genes <- lapply(results.list,function(x){
-  as.data.frame(x) %>% filter(avg_log2FC >= 1 & p_val_adj <= 0.05) %>% pull(gene)
+  as.data.frame(x) %>% dplyr::filter(avg_log2FC >= 1 & p_val_adj <= 0.05) %>% pull(gene)
 })
 
 infected_genes$Tuft <- NULL
@@ -138,13 +214,19 @@ presence_matrix <- as.matrix(presence_matrix)
 
 mat <- make_comb_mat(infected_genes)
 
-mat_low_filter <- mat[comb_size(mat) >= 10]
+mat_low_filter <- mat[comb_size(mat) >= 5]
 
 # Create the UpSet plot
 us_plot <- UpSet(mat_low_filter,
       top_annotation = upset_top_annotation(mat_low_filter, add_numbers = TRUE),
       right_annotation = upset_right_annotation(mat_low_filter, add_numbers = TRUE),
       comb_order = rev(order(comb_size(mat_low_filter))),
+      )
+
+us_plot_full <- UpSet(mat,
+      top_annotation = upset_top_annotation(mat, add_numbers = TRUE),
+      right_annotation = upset_right_annotation(mat, add_numbers = TRUE),
+      comb_order = rev(order(comb_size(mat))),
       )
 ```
 
@@ -153,14 +235,14 @@ save_ggplot_formats(
   plt = us_plot,
   base_plot_dir = plots_folder,
   plot_obj = "not_gg",
-  plt_name = "upset_unique_low_end_filter",
+  plt_name = "upset_unique_low_end_filter_5",
   width = 6, height = 3
 )
 ```
 
 ```{r}
 # Define the binary string labels corresponding to the unique genes
-labels <- c("1000", "0100", "0010", "0001")
+labels <- c("10000", "01000", "00100", "00010","00001")
 
 # Create an empty list to store results
 unique_genes_list <- list()
@@ -171,28 +253,41 @@ for (i in seq_along(labels)) {
 }
 
 # Assign meaningful names to the list elements
-names(unique_genes_list) <- c("abs.ent_unique", "eec_unique", "gp_unique", "stem_unique")
+names(unique_genes_list) <- c("abs.ent_unique","gp_unique","ta_unique",
+                              "stem_unique","eec_unique")
 
 
 # Custom function to convert a number to a binary string with leading zeros
-to_binary <- function(x, digits = 4) {
+to_binary <- function(x, digits = 5) {
   binary <- intToBits(x)[1:digits]
   paste(rev(as.integer(binary)), collapse = "")
 }
 
+binary_to_decimal <- function(bin_input) {
+  # If input is numeric, convert to character
+  bin_str <- as.character(bin_input)
+  # split into individual digits
+  digits <- as.numeric(strsplit(bin_str, "")[[1]])
+  # reverse (since rightmost is least significant bit)
+  digits <- rev(digits)
+  # compute decimal value
+  sum(digits * 2^(seq_along(digits) - 1))
+}
+
 # Define the names for the primary sets
 names_map <- list(
-  "1000" = "Abs.Ent.",
-  "0100" = "EEC",
-  "0010" = "Goblet+Paneth",
-  "0001" = "Stem"
+  "10000" = "Abs.Ent.",
+  "01000" = "GP",
+  "00100" = "TA",
+  "00010" = "Stem",
+  "00001" = "EEC"
 )
 
 # Generate the list of all combinations
 all_combinations <- list()
 
-# Loop through all binary combinations (0001 to 1111)
-for (i in 1:15) {
+# Loop through all binary combinations (00001 to 11111)
+for (i in 1:binary_to_decimal(11111)) {
   # Convert to 4-digit binary string
   binary_code <- to_binary(i)
   
@@ -212,20 +307,47 @@ for (i in 1:15) {
   all_combinations[[set_name]] <- geneset
 }
 
-names(all_combinations)[15] <- "Common response"
+names(all_combinations)[length(names(all_combinations))] <- "Common response"
 # Save the list to an Excel file
 write.xlsx(all_combinations,
            file = file.path(charts_folder,"infected_all_combinations.xlsx"), 
            asTable = FALSE)
 ```
 
+```{r}
+generate_volcano_plots_mark_unique(
+  results_list = results.list,
+  unique_genes_list = unique_genes_list,
+  pos_color = "#E41A1C",
+  neg_color = "#377EB8",
+  mark_color = "purple",
+  plots_folder = plots_folder,
+  charts_folder = charts_folder,
+  filename_prefix = "Full_unique_purple_v3",
+  do_save = TRUE,
+  #subset_condition = 1:4
+  )
+```
+
 # GO analysis
 ```{r}
-genes_entrez <- lapply(unique_genes_list,function(upgene){
-  gene_e <- bitr(upgene, fromType="SYMBOL", toType = "ENTREZID", 
-                    OrgDb = "org.Mm.eg.db")
-  return(gene_e[["ENTREZID"]])
+unique_genes_list[["Abs.Ent+GP"]] <- extract_comb(mat, "11000")
+
+test <- lapply(unique_genes_list,function(old_genes){
+  new_genes <- update_symbols_biomart(old_genes, ensembl38, ensembl39)
+  new_genes <- new_genes %>% dplyr::filter(!is.na(symbol_new))
+  return(new_genes)
 })
+
+unique_genes_list_update <- lapply(test,function(x) x %>% pull(symbol_new))
+```
+
+```{r}
+# genes_entrez <- lapply(unique_genes_list,function(upgene){
+#   gene_e <- bitr(upgene, fromType="SYMBOL", toType = "ENTREZID", 
+#                     OrgDb = "org.Mm.eg.db")
+#   return(gene_e[["ENTREZID"]])
+# })
 
 
 if(comparison == "GO"| comparison == "all"){
@@ -241,9 +363,13 @@ if(comparison == "GO"| comparison == "all"){
   
   write.csv(as.data.frame(unique_infected_compare_GO),
             file = file.path(charts_folder,
-                             "unique_infected_compare_GO.csv"),
+                             "unique_infected_compare_GO_update_new.csv"),
             row.names = FALSE)
-  unique_infected_compare <- unique_infected_compare_GO
+  write.xlsx(as.data.frame(unique_infected_compare_GO),
+            file = file.path(charts_folder,
+                             "unique_infected_compare_GO_update_new.xlsx"),
+            rownames = FALSE)
+  #unique_infected_compare <- unique_infected_compare_GO
 }
 
 if(comparison == "Reactome"| comparison == "all"){
@@ -289,7 +415,7 @@ if(comparison == "KEGG"| comparison == "all"){
 # Save results
 ```{r}
 saveRDS(unique_infected_compare_GO,
-        file.path(GO_save_folder,"unique_infected_compare_GO.Rds"))
+        file.path(GO_save_folder,"unique_infected_compare_GO_with_Absentgp.Rds"))
 saveRDS(unique_infected_compare_KEGG,
         file.path(pathway_save_folder,"unique_infected_compare_kegg.Rds"))
 saveRDS(unique_infected_compare_reactome,
@@ -298,44 +424,183 @@ saveRDS(unique_infected_compare_reactome,
 
 ```{r}
 unique_infected_compare_GO <-
-  readRDS(file.path(GO_save_folder,"unique_infected_compare_GO.Rds"))
+  readRDS(file.path(GO_save_folder,"unique_infected_compare_GO_with_Absentgp.Rds"))
+```
+
+
+#TODO -------------
+# Plotting GO
+# Calculations
+```{r}
+# Filter and arrange by p-value
+up_compare_filter <- dplyr::filter(unique_infected_compare_GO,
+                            Count > count.cutoff, Cluster != "stem_unique") %>% arrange(p.adjust)
+
+# -log of adjusted p.value
+up_compare_filter@compareClusterResult$p.adjust <- 
+  -log10(up_compare_filter@compareClusterResult$p.adjust)
+```
+
+# Maximal and minimal p-values for scales
+```{r}
+max_p <- max(up_compare_filter@compareClusterResult$p.adjust)
+
+if(max_p > 30){max_p <- 30}
+```
+
+# Fortify data.frames for plotting (topN)
+```{r}
+# Make data frames for plotting. Only use topN terms per Cluster
+df_up <- fortify(up_compare_filter, 
+                         showCategory = topN, split = NULL)
+df_up <- droplevels(df_up)
+
+df_up <- df_up %>% dplyr::filter(Cluster != "stem_unique (39)")
+df_up$Cluster <- droplevels(df_up$Cluster)
+
+x_labels_up <- gsub("\n"," ",levels(df_up$Cluster))
+
+levels(df_up$Cluster) <- x_labels_up
+```
+
+# Clustering
+```{r}
+clust_met <- "complete"
+
+markers.up <- df_up$Description %>% unique()
+
+p.mat.up <- df_up %>% 
+  dplyr::filter(Description %in% markers.up) %>% 
+  dplyr::select(Description,Cluster,p.adjust) %>%
+  pivot_wider(names_from = Cluster,values_from = p.adjust) %>%
+  data.frame() # make df as tibbles -> matrix annoying
+row.names(p.mat.up) <- p.mat.up$Description  # put gene in `row`
+p.mat.up <- p.mat.up[,-1] #drop gene column as now in rows
+p.mat.up[is.na(p.mat.up)] <- 0
+
+# hclust with distance matrix
+clust.up <- hclust(dist(p.mat.up %>% as.matrix()),method = clust_met) 
 ```
 
 ```{r}
-generate_volcano_plots(results_list = results.list[1:4],
-                       pos_color = "#E41A1C",
-                       neg_color = "#377EB8",
-                       plots_folder = plots_folder,
-                       charts_folder = charts_folder
-                       )
+theme.dp <- list(
+  geom_point(),
+  theme_dose(7),
+  #coord_fixed(ratio = 1.4),
+  scale_color_gradient(low = pos_color_low,
+                       high = pos_color_high,
+                       limits = c(0,max_p)), #adjust limits
+  ylab(NULL),
+  theme(
+    axis.title = element_blank(),
+    axis.text.x = element_text(angle = 90,
+                               hjust = 1,
+                               vjust = .5),
+    axis.text.y = element_text(#angle = 25,
+                               vjust = 0.5,
+                               margin = margin(r = -10) ),
+        legend.text = element_text(size = 7),
+        legend.position = "inside",
+        legend.position.inside =  c(2.7,-0.1), # GO
+        #legend.position = c(3,-0.1), # kegg
+        #legend.position = c(2.5,-0.1), # reactome
+        legend.direction = "horizontal",
+        legend.box = "horizonal",
+        legend.spacing.x = unit(0.05, 'cm'),
+        legend.title = element_text(size = 7),
+    legend.title.position = "top",
+        panel.background = element_rect(fill='transparent'), #transparent panel bg
+    plot.background = element_rect(fill='transparent', color = NA), #transparent plot bg
+   # panel.grid.major = element_blank(), #remove major gridlines
+   # panel.grid.minor = element_blank(), #remove minor gridlines
+    legend.background = element_rect(fill='transparent'), #transparent legend bg
+    legend.box.background = element_blank(), #transparent legend panel
+   axis.ticks = element_blank()
+  ),
+  labs(color = "-log10 (p.adjust)"),
+  guides(size = guide_legend(order = 2),
+         color = guide_colorbar(order = 1,
+                                direction = "horizontal",
+                                title.theme =
+                                  element_text(
+                                    margin = margin(0, 0, 0, 0, "pt"))
+                                )
+         )
+)
+
+# GO + Pathway Up
+df_up_rc <- df_up
+
+df_up_rc$Description <- fct_relevel(df_up_rc$Description,
+                                rev(clust.up$labels[clust.up$order]))
+
+df_up_rc <- df_up_rc %>%
+  mutate(p.adjust = ifelse(p.adjust > max_p, max_p, p.adjust))
+
+df_up_rc <- mutate(df_up_rc, 
+                     FoldEnrichment = GeneRatio / parse_ratio(BgRatio))
+
 ```
 
 ```{r}
-generate_volcano_plots_mark_unique(
-  results_list = results.list,
-  unique_genes_list = unique_genes_list,
-  pos_color = "#E41A1C",
-  neg_color = "#377EB8",
-  mark_color = "purple",
-  plots_folder = plots_folder,
-  charts_folder = charts_folder,
-  filename_prefix = "Full_unique_purple",
-  save = TRUE,
-  subset_condition = 1:4
+dp_up_FE <- ggplot(df_up_rc, aes(x = Cluster, 
+                                 y = Description, 
+                                 size = FoldEnrichment,
+                                 color = p.adjust,
+                                 stroke = NA)) +
+  theme.dp + scale_y_discrete(position = "right")
+```
+
+# Saving
+
+## Save Plots
+```{r}
+save_ggplot_formats(
+  plt = dp_up_FE,
+  create_plot_subdir = TRUE,
+  base_plot_dir = plots_folder,
+  plt_name = glue("{NAME}_dotplot_up_rc_foldenrichment_top{topN}",
+                  "_count_cuotff_{count.cutoff}_absgp"),
+  width = 3.2,height = 4
   )
 ```
 
+```{r}
+Idents(scrna) <- "stage"
+umap_d05 <- DimPlot(scrna, 
+          label = FALSE, 
+          reduction = "INTE_UMAP", 
+          cells.highlight = WhichCells(scrna, idents = "d05"),
+          cols.highlight = inf_cols[2],
+          cols = "lightgrey",
+          sizes.highlight = 0.1) + ggtitle("d05") + mini_umap_theme + NoLegend( ) + theme(
+            plot.title = element_text(hjust = 0.5, size = 7))
+
+umap_d05i <- DimPlot(scrna, 
+          label = FALSE,
+          reduction = "INTE_UMAP", 
+          cells.highlight = WhichCells(scrna, idents = "d05i"),
+          cols.highlight = inf_cols[3],
+          cols = "lightgrey",
+          sizes.highlight = 0.1,
+        ) + ggtitle("d05i") + mini_umap_theme + NoLegend( ) + theme(plot.title = element_text(
+          hjust = 0.5, size = 7))
+```
 
 ```{r}
-volcanos_unique_infected <- generate_volcano_plots_mark_unique(
-  results_list = results.list[1:4],
-  unique_genes_list = unique_genes_list,
-  pos_color = "#E41A1C",
-  neg_color = "#377EB8",
-  mark_color = "purple",
-  plots_folder = plots_folder,
-  charts_folder = charts_folder,
-  filename_prefix = "Full_unique_purple",
-  save = FALSE
+save_ggplot_formats(
+  plt = umap_d05,
+  create_plot_subdir = TRUE,
+  base_plot_dir = plots_folder,
+  plt_name = "umap_d05",
+  width = 3.5,height = 3
+  )
+
+save_ggplot_formats(
+  plt = umap_d05i,
+  create_plot_subdir = TRUE,
+  base_plot_dir = plots_folder,
+  plt_name = "umap_d05i",
+  width = 3.5,height = 3
   )
 ```

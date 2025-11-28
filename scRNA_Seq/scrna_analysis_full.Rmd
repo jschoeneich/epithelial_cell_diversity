@@ -18,33 +18,62 @@ library(glue)
 library(vctrs)
 library(gridExtra)
 library(cowplot)
-library(EnhancedVolcano)
-library(ComplexHeatmap)
 ```
 
 # Adjustments
 ```{r}
-harddrive <- "E:"
+# Define project root path (adjust based on OS)
+harddrive <- "H:/231248/NTFS_3.64TB"  # For Windows
+#harddrive <- "/media/johannes/EXTERNAL_USB/231248/NTFS_3.64TB"  # For Linux/Mac
 
 source(file.path(harddrive,"helper_functions.R"))
 source(file.path(harddrive,"scrna_datasets/save_load_helper.R"))
 source(file.path(harddrive,"scrna_datasets/single_cell_themes.R"))
 
 analysis_folder <- file.path(harddrive,
-                "scrna_datasets/scrna_both_d25/scrna_full_2024_both_d25")
+                "scrna_datasets/scrna_full_both_d25_mito_filter_inf/scrna_full_both_d25_mito100_inf")
 
-cluster_use <- "int_0.3_broad"
+#folder for the full dataset
+scrna_folder <- file.path(
+  harddrive,
+  "scrna_datasets/scrna_full_both_d25_mito_filter_inf",
+  "scrna_full_both_d25_mito100_inf"
+)
+```
+
+
+```{r}
+scrna_full <- load_object(file.path(scrna_folder,
+                                    "scrna_inf_bothd25.Rds"))
+
+Idents(scrna_full) <- "seurat_clusters"
+
+scrna_full_noc2 <- subset(scrna_full, 
+                          idents = c("2","11",as.character(14:18)),
+                          invert = TRUE)
+
+save_object(scrna_full_noc2,file.path(scrna_folder,
+                                      "scrna_full_filtered_inf.Rds"))
 ```
 
 ```{r}
-#scrna <- load_object(file.path(analysis_folder,
-#                                            "/save/scrna_phase_clustering.Rds"))
+#once the script ran, you can recall parts using this
+cluster_use <- "int_0.3_broad_TA"
 
+# scrna <- load_object(
+#   file.path(analysis_folder,"scrna_uninf_bothd25.Rds"))
+# 
 scrna <- load_object(
-  file.path(analysis_folder,"scrna_uninf_bothd25.Rds"))
+   file.path(analysis_folder,"scrna_full_filtered_inf.Rds"))
 
-scrna_inf <- load_object(
-  file.path(analysis_folder,"scrna_inf_bothd25.Rds"))
+scrna_raw <- load_object(file.path(analysis_folder,
+                                            "/save/scrna_rawdata.Rds"))
+```
+
+```{r}
+# scrna <- load_object(file.path(analysis_folder,
+#                                            "/save/scrna_phase_clustering.Rds"))
+# 
 
 plots_folder <- file.path(analysis_folder,"analysis/plots")
 
@@ -60,46 +89,70 @@ condition <- "uninf"
 ```
 
 ```{r}
-#DEGO Not yet implemented in this script. Might follow in another script.
-GO_save_folder <- file.path(analysis_folder,"saves/")
+# get all the metadata column names that match integrated_snn_res.0.X
+res_cols <- grep("^integrated_snn_res\\.0\\.[1-8]$", colnames(scrna@meta.data), value = TRUE)
 
-pathway_save_folder <- file.path(analysis_folder,"Pathway/saves/")
+# apply numeric reordering to each column
+scrna@meta.data <- scrna@meta.data %>%
+  mutate(across(all_of(res_cols),
+                ~ fct_reorder(., as.numeric(as.character(.)), .fun = min)))
 
-# Which ontology: choose between all, biological process (bp), 
-# molecular function (mf) and cellular component (cc).
-ont <- "bp"
-
-# P-adjust cutoff. Adjustment method is benjamini-hochberg (FDR)
-p.cutoff <- 0.05
-
-# The number of GO terms to compare
-topN  <- 10
-
-# Count cutoff. The low end filtering of counts
-count.cutoff <- 10
-
-# Heatmap coloring options. 
-pos_color_low <- "#fff5f0"
-pos_color_high <- "#E41A1C" # The color to which the significant p-values converge
-
-neg_color_low <- "#F7FBFF"
-neg_color_high <- "#377EB8"
-```
-
-```{r}
 DimPlot(scrna, reduction = "INTE_UMAP", 
                 group.by =  "integrated_snn_res.0.3",
                 label = FALSE)
 ```
 
 ```{r}
-"Xist" %in% rownames(scrna)
-#if FALSE, its correct (only if you filtered the x-chromosomal genes)
+# Define the genes to remove
+genes_to_remove <- c("Xist", "Jpx", "Ftx", "Tsx", "Cnbp2")
 
+# Subset the object, keeping only genes not in that list
+scrna_full_noc2 <- scrna_full_noc2[!rownames(scrna_full_noc2) %in% genes_to_remove, ]
+
+"Xist" %in% rownames(scrna_full_noc2)
+#if FALSE, its correct (only if you filtered the x-chromosomal genes)
+```
+
+#scrna_raw
+```{r}
+tbl_raw <- table(scrna$stage)
+# Turn table into a data frame
+df_raw <- as.data.frame(tbl_raw)
+colnames(df_raw)[1] <- "timepoint"
+
+png(file.path(plots_folder,"png/table_noc2.png"), 
+     width = 500, height = 200)
+grid.table(df_raw)
+dev.off()
+
+pdf(file.path(plots_folder,"pdf/table_noc2.pdf"))
+grid.table(df_raw)
+dev.off()
+
+# Plot
+bp <- ggplot(df_raw, aes(x = timepoint, y = Freq, fill = timepoint)) +
+  geom_bar(stat = "identity") +    
+  geom_text(aes(label = Freq,
+                vjust = -0.5    # position above the bar
+                )) +
+  barplot_theme + scale_fill_manual(values = inf_cols) + NoLegend()
+
+save_ggplot_formats(plt = bp,
+                    plt_name = "barplot_noc2",
+                    base_plot_dir = plots_folder,
+                    width = 3.5,
+                    height = 4)
+
+```
+
+
+```{r}
 genename <- c("Lct","Maf","Aoc1","Neu1" ,#Enterocyte
               "Chga","Chgb","Neurod1","Cpe", #EEC
-              "Muc2","Defa24","Agr2","Ccl6", #Goblet + Paneth
-              "Olfm4","Lgr5","Ascl2","Gkn3", #Stem
+              "Muc2","Defa24","Agr2","Ccl6", "Lyz1", #Goblet + Paneth
+              "Olfm4","Lgr5","Ascl2","Gkn3",#Stem
+              "Mki67",
+              "Stmn1","Tubb5","Ube2c","Mybl2", #TA
               "Avil")                        #Tuft
 
 #genename <- rownames(condition_hm@matrix)
@@ -129,7 +182,7 @@ for (i in seq(1, length(genename), by = 4)){
   ni = min(i + 3, length(genename))
   vln.plot.list[[i]] <- VlnPlot(scrna,
                                 features = genename[i:ni],
-                                group.by = "int_0.3_broad",
+                                group.by = "integrated_snn_res.0.3",
                                 ncol = 2,
                                 pt.size = 0) & theme(axis.title.x =
                                                        element_blank())
@@ -165,21 +218,41 @@ lapply(seq_along(fplot.list),
 )
 ```
 
-```{r, eval=FALSE}
-current.cluster.ids <- as.character(levels(scrna$integrated_snn_res.0.3))
+```{r}
+for(meta_column in c("integrated_snn_res.0.2","integrated_snn_res.0.3","stage","name")){
+  make_cluster_plots(scrna, 
+                     meta_column,
+                     reduction = "INTE_UMAP", 
+                     plots_folder =  plots_folder,
+                     base_size = 3,
+                     aspect_ratio = 1,
+                     show_cell_numbers = TRUE
+                   )
+}
+```
 
-new.cluster.ids <- c(rep("Abs. Enterocyte",3),
-                     "Goblet+Paneth","Stem",rep("Abs. Enterocyte",2),"EEC","EEC")
+```{r}
+#0:2 Abs.Ent.
+#3 Goblet + Paneth
+#4 Stem + progenitor
+#5 EEC
+#6-8 Abs.Ent.
+#9 Tuft
+#10-14 Abs.Ent.
 
-scrna$int_0.3_broad <- scrna$integrated_snn_res.0.3
+# Your new cluster labels
+new.cluster.ids <- c(rep("Abs.Ent.",3),
+                     "Gob./Pan.","Stem","EEC",
+                     rep("Abs.Ent.",3),
+                     "Tuft",rep("Abs.Ent.",5))
 
-levels(scrna$int_0.3_broad) <- new.cluster.ids
+# Rename the metadata column and set Idents at the same time
+scrna$int_0.3_broad <- factor(scrna$integrated_snn_res.0.2, 
+                              labels = new.cluster.ids)
 Idents(scrna) <- scrna$int_0.3_broad
 
-scrna$int_0.3_broad_progenitor <- "int_0.3_broad"
 
-names(new.cluster.ids) <- levels(scrna)
-scrna <- RenameIdents(scrna, new.cluster.ids)
+Idents(scrna) <- "int_0.3_broad"
 
 DimPlot(scrna, reduction = "INTE_UMAP", 
                 group.by =  "int_0.3_broad",
@@ -189,8 +262,8 @@ plot <- DimPlot(scrna, reduction = "INTE_UMAP",
                 group.by =  "int_0.3_broad",
                 label = TRUE)
 
-select.cells <- CellSelector(plot)
-scrna <- SetIdent(scrna, cells = select.cells, value = "Goblet+Paneth")
+select.gob <- CellSelector(plot)
+scrna <- SetIdent(scrna, cells = select.gob, value = "Gob./Pan.")
 
 select.tuft <- CellSelector(plot)
 scrna <- SetIdent(scrna, cells = select.tuft, value = "Tuft")
@@ -199,103 +272,267 @@ select.eec <- CellSelector(plot)
 scrna <- SetIdent(scrna, cells = select.eec, value = "EEC")
 
 select.ent <- CellSelector(plot)
-scrna <- SetIdent(scrna, cells = select.ent, value = "Abs.Ent")
+scrna <- SetIdent(scrna, cells = select.ent, value = "Abs.Ent.")
 
 scrna$int_0.3_broad <- Idents(scrna)
-DimPlot(scrna, reduction = "INTE_UMAP",group.by = "int_0.3_broad")
+
+scrna[["int_0.3_broad",drop = TRUE]] <- scrna[["int_0.3_broad", drop = TRUE]] %>%
+  fct_relevel(sort(levels(.)))
+
+DimPlot(scrna, reduction = "INTE_UMAP", 
+                group.by =  "int_0.3_broad",
+                label = TRUE)
 ```
 
-```{r, eval = FALSE}
-#progenitor annotation, if possible
 
-Idents(scrna) <- "integrated_snn_res_0.3"
+################## TA PART
 
-select.gob.prog <- CellSelector(plot)
-scrna_gob <- scrna[,select.full.gob]
+## 2. Marker Definitions
 
-Idents(scrna_gob) <- "integrated_snn_res.0.3"
-gob.prog <- WhichCells(scrna_gob, idents = 4)
+```{r marker-genes}
+# Transit Amplifying (TA) markers
+ta_markers <- c("Mki67", "Pcna", "Top2a", "Cdk1", "Ccnb1", "Ccnb2",
+                "Birc5", "Aurkb", "Ube2c", "Tpx2", "Stmn1", "Hmgb2",
+                "Myc", "E2f1", "Cdc20", "Tubb5")
 
-scrna$int_0.3_broad_progenitor <- scrna$int_0.3_broad
+# High-confidence TA markers
+ta_markers_hc <- c("Stmn1", "Tubb5", "Zfp101", "Ube2c", "Foxm1", "Mybl2")
 
-Idents(scrna) <- "int_0.3_broad_progenitor"
-
-DimPlot(scrna, reduction = "INTE_UMAP",group.by = "int_0.3_broad_progenitor")
-
-scrna <- SetIdent(scrna, cells = gob.prog, value = "Goblet+Paneth Progenitor")
-
-select.eec.prog <- CellSelector(plot)
-scrna <- SetIdent(scrna, cells = select.eec.prog, value = "EEC progenitor")
-
-select.ent.prog <- CellSelector(plot)
-scrna <- SetIdent(scrna, cells = select.ent.prog, value = "Enterocyte progenitor")
-
-select.early.ent <- CellSelector(plot)
-scrna <- SetIdent(scrna, cells = select.early.ent, value = "Early Enterocyte")
-
-select.cells <- CellSelector(plot)
-scrna <- SetIdent(scrna, cells = select.cells, value = "Goblet+Paneth Progenitor")
-
-scrna$int_0.3_broad_progenitor <- Idents(scrna)
-scrna$int_0.3_broad_progenitor <- factor(scrna$int_0.3_broad_progenitor,
-                                          levels =
-                                           c("Abs.Ent","EEC","Goblet+Paneth",
-                                             "Stem","Tuft","Early Enterocyte",
-                                                     "Enterocyte progenitor",
-                                                     "EEC progenitor",
-                                                     "Goblet+Paneth Progenitor")
-                                            )
-
-scrna$int_0.3_broad <- factor(scrna$int_0.3_broad,
-                              levels = c("Abs.Ent","EEC","Goblet+Paneth",
-                                         "Stem","Tuft")
-                              )
+# Intestinal stem cell markers
+stem_markers <- c("Lgr5", "Olfm4", "Ascl2", "Gkn3")
 ```
+
+## 3. Add Module Scores to Standard Dataset
+
+```{r module-scores-standard}
+# Compute module scores for TA and stem cell programs
+scrna <- AddModuleScore(scrna, features = list(ta_markers_hc), name = "TA_Score_hc")
+scrna <- AddModuleScore(scrna, features = list(stem_markers), name = "Stem_Score")
+```
+
+```{r scatter-standard}
+# Idents(scrna) <- "int_0.3_broad"
+# 
+# # Visualize TA vs Stem score separation
+# fs_mito25 <- FeatureScatter(scrna_mito25, feature1 = "Stem_Score1", feature2 = "TA_Score_hc1") +
+#   ggtitle("TA vs Stem Score (cluster)")
+
+Idents(scrna) <- "name"
+
+# Visualize TA vs Stem score separation
+fs_day <- FeatureScatter(scrna, feature1 = "Stem_Score1", feature2 = "TA_Score_hc1") +
+  ggtitle("TA vs Stem Score (time)")
+  
+# save_ggplot_formats(plt = fs,
+#                     plt_name = "featureplot",
+#                     base_plot_dir = plots_folder,
+#                     width = 6,
+#                     height = 5)
+
+save_ggplot_formats(plt = fs_day,
+                    plt_name = "featurescatter_TA",
+                    base_plot_dir = plots_folder,
+                    width = 6,
+                    height = 5)
+
+```
+
+## 4. Identify and Annotate Cells (Standard)
+
+```{r annotate-standard}
+# Classify TA-like and stem-like cells using score thresholds
+ta_cells_std <- WhichCells(scrna, expression = TA_Score_hc1 > 0.5 & Stem_Score1 < 0.5)
+stem_cells_std <- WhichCells(scrna, expression = Stem_Score1 > 0.5 & TA_Score_hc1 < 0.5)
+
+# Inspect phase distribution of TA-like cells
+table(scrna$Phase[ta_cells_std])
+
+# Annotate refined identities
+scrna$refined_identity <- "other"
+scrna$refined_identity[ta_cells_std] <- "Transit Amplifying"
+scrna$refined_identity[stem_cells_std] <- "CBC Stem"
+
+scrna$int_0.3_broad_TA <- as.character(scrna$int_0.3_broad)
+
+scrna$int_0.3_broad_TA[ta_cells_std] <- "TA"
+scrna$int_0.3_broad_TA <- as.factor(scrna$int_0.3_broad_TA)
+```
+
+```{r dimplot-standard}
+col_vec <- Hue_Pal(5)
+
+col_vec <- append(col_vec,"#F16000", after = 5)
+
+# UMAP plot colored by refined identity
+#DimPlot(scrna_mito25, group.by = "refined_identity", reduction = "INTE_UMAP") +
+#  ggtitle("Standard Dataset: Refined Identities")
+
+dp <- DimPlot(scrna_full_noc2,
+              group.by = "int_0.3_broad_TA", reduction = "INTE_UMAP", cols = col_vec) + NoLegend() + ggtitle(element_blank()) & mini_umap_theme 
+
+save_ggplot_formats(plt = dp,
+                    plt_name = "UMAP_mito100_inf_noc2_no11",
+                    base_plot_dir = plots_folder,
+                    width = 4,
+                    height = 4)
+```
+
+################## END OF TA PART
 
 ```{r, eval=FALSE}
-scrna_uninf <- scrna[,!scrna@meta.data$name == "d05i"]
+scrna_uninf <- scrna_full_noc2[,!scrna_full_noc2@meta.data$stage == "d05i"]
 
-scrna_uninf$name <- as.factor(scrna_uninf$name)
-
-save_object(scrna,
-            file_name = file.path(analysis_folder,"scrna_inf_bothd25.Rds"))
+scrna_uninf$stage <- as.factor(scrna_uninf$stage)
+# 
+# save_object(scrna,
+#             file_name = file.path(analysis_folder,"scrna_bothd25.Rds"))
 
 save_object(scrna_uninf,
-            file_name = file.path(analysis_folder,"scrna_uninf_bothd25.Rds"))
+            file_name = file.path(analysis_folder,"scrna_full_filtered_uninf.Rds"))
 ```
 
 ```{r}
-#Quality post filtering
+# Quality post filtering
 
-Idents(scrna_inf) <- "name"
-feats_to_plot <- c("nFeature_RNA", "nCount_RNA", "percent.ribo","percent.mt")
+Idents(scrna_raw) <- "stage"
+feats_to_plot <- c("nFeature_RNA", "nCount_RNA",
+                   "percent.ribo","percent.mt")
 
-plt <- VlnPlot(
-  object = scrna_inf,
-  features = feats_to_plot,
-  ncol = 2,
+VlnPlot_independent <- function(object, features, ylims = NULL,
+                                cols = NULL, pt.size = 0, ncol = 1,
+                                theme_common = NULL) {
+  # Einzelplots erzeugen
+  plots <- VlnPlot(
+    object,
+    features = features,
+    cols = cols,
+    pt.size = pt.size,
+    combine = FALSE
+  )
+  
+  # Falls Limits angegeben wurden, anwenden
+  if (!is.null(ylims)) {
+    stopifnot(length(ylims) == length(features))
+    for (i in seq_along(features)) {
+      if (!is.null(ylims[[i]])) {
+        plots[[i]] <- plots[[i]] + ylim(ylims[[i]][1], ylims[[i]][2])
+      }
+    }
+  }
+  
+  # Gemeinsames Theme anwenden, falls angegeben
+  if (!is.null(theme_common)) {
+    plots <- lapply(plots, function(p) p + theme_common + NoLegend() )
+  }
+  
+  # Kombinieren mit patchwork
+  wrap_plots(plots, ncol = ncol)
+}
+
+theme_common <- theme(
+  axis.title.x = element_blank(),
+  text = element_text(size = 7),
+  axis.text = element_text(size = 7),
+  axis.ticks = element_blank(),
+  strip.background = element_blank(),
+  legend.background = element_blank(),
+  panel.background = element_blank(),
+  plot.background = element_blank()
+)
+max_nfeature <- max(scrna_raw$nFeature_RNA)
+max_ncount <- max(scrna_raw$nCount_RNA)
+max_mito <- max(scrna_raw$percent.mt)
+max_ribo <- max(scrna_raw$percent.ribo)
+
+plt <- VlnPlot_independent(
+  scrna_raw,
+  features = c("nFeature_RNA", "nCount_RNA", "percent.ribo", "percent.mt"),
+  ylims = list(c(0, max_nfeature), c(0, max_ncount), 
+               c(0, max_ribo), c(0, max_mito)),
   cols = inf_cols,
-  pt.size = 0
-) & theme(axis.title.x = element_blank(),
-          text = element_text(size = 5),
-          axis.text = element_text(size = 5),
-          axis.ticks = element_blank(),  
-          strip.background = element_blank(),
-          legend.background = element_blank(),
-          panel.background = element_blank(), #transparent panel bg
-          plot.background = element_blank(), #transparent plot bg
-          )
+  pt.size = 0,
+  ncol = 4,
+  theme_common = theme_common
+)
 
+Idents(scrna_full) <- "stage"
+plt_post_filter <- VlnPlot_independent(
+  scrna_full,
+  features = c("nFeature_RNA", "nCount_RNA", "percent.ribo", "percent.mt"),
+  ylims = list(c(0, max_nfeature), c(0, max_ncount), 
+               c(0, max_ribo), c(0, max_mito)),
+  cols = inf_cols,
+  pt.size = 0,
+  ncol = 4,
+  theme_common = theme_common
+) 
+
+
+Idents(scrna_full_noc2) <- "stage"
+plt_post_cluster_filter <- VlnPlot_independent(
+  scrna_full_noc2,
+  features = c("nFeature_RNA", "nCount_RNA", "percent.ribo", "percent.mt"),
+  ylims = list(c(0, max_nfeature), c(0, max_ncount), 
+               c(0, max_ribo), c(0, max_mito)),
+  cols = inf_cols,
+  pt.size = 0,
+  ncol = 4,
+  theme_common = theme_common
+) 
+```
+
+
+```{r}
 save_ggplot_formats(
   plt = plt,
   base_plot_dir = plots_folder,
-  plt_name = "postfilter_vlnplot_inf_v2",
-  width = 4, height = 4
+  plt_name = "prefilter_vlnplot_inf_long",
+  width = 6, height = 1.5
 )
 
+save_ggplot_formats(
+  plt = plt_post_filter,
+  base_plot_dir = plots_folder,
+  plt_name = "postfilter_vlnplot_inf_long",
+  width = 6, height = 1.5
+)
+
+save_ggplot_formats(
+  plt = plt_post_cluster_filter,
+  base_plot_dir = plots_folder,
+  plt_name = "postfilter_vlnplot_cluster_filter_inf_long",
+  width = 6, height = 1.5
+)
+```
+
+
+```{r}
+fp <- FeaturePlot(
+    object = scrna,
+    pt.size = 0.001,
+    label = FALSE,
+    features = feats_to_plot,
+    reduction = "INTE_UMAP",
+    order = TRUE,
+    cols = c("lightgrey", "red"),
+    ncol = 2,
+    max.cutoff = "q95"
+  ) & fp_theme
+
+save_ggplot_formats(
+  plt = fp,
+  base_plot_dir = plots_folder,
+  plt_name = "prefilter_featureplot_inf",
+  width = 4, height = 3
+)
+
+```
+
+
+```{r}
 feats_to_plot <- c("G1.Score", "S.Score", "G2M.Score")
 plt <-  VlnPlot(
-    object = scrna_inf,
+    object = scrna,
     features = feats_to_plot,
     ncol = 2,
     cols = inf_cols,
@@ -305,15 +542,16 @@ plt <-  VlnPlot(
 save_ggplot_formats(
   plt = plt,
   base_plot_dir = plots_folder,
-  plt_name = "postfilter_cellphase_inf",
-  width = 8, height = 7
+  plt_name = "postfilter_cellphase_inf_noc2",
+  width = 4, height = 4
 )
 ```
 
 ```{r}
+cluster_use <- "int_0.3_broad_TA"
 #Heatmap of marker genes
 dp <- DotPlot_scCustom(
-      seurat_object = scrna_inf,
+      seurat_object = scrna,
       features = genename,
       group.by = cluster_use,
       assay = "RNA",
@@ -334,7 +572,7 @@ dp <- DotPlot_scCustom(
 save_ggplot_formats(
       plt = dp,
       base_plot_dir = plots_folder,
-      plt_name = glue("dotplot_{condition}_v2"),
+      plt_name = glue("dotplot_{condition}_noc2_v2"),
       width = 5,
       height = 3
 )
@@ -389,21 +627,21 @@ DotPlot(
 ```
 
 ```{r}
-uninf_plot <- DimPlot(scrna,reduction = "INTE_UMAP",
-                      group.by = "name",cols = uninf_cols) + 
+uninf_plot <- DimPlot(scrna_uninf,reduction = "INTE_UMAP",
+                      group.by = "stage",cols = uninf_cols) + 
   ggtitle(element_blank()) + mini_umap_theme
 
-inf_plot <- DimPlot(scrna_inf,reduction = "INTE_UMAP",
-                    group.by = "name", cols = inf_cols) + 
+inf_plot <- DimPlot(scrna,reduction = "INTE_UMAP",
+                    group.by = "stage", cols = inf_cols) + 
   ggtitle(element_blank()) + mini_umap_theme
 ```
 
 ```{r}
-uninf_plot_broad <- DimPlot(scrna,reduction = "INTE_UMAP",
-                            group.by = "int_0.3_broad") + 
+uninf_plot_broad <- DimPlot(scrna_uninf,reduction = "INTE_UMAP",
+                            group.by = "int_0.3_broad_TA") + 
   ggtitle(element_blank()) + mini_umap_theme
 
-inf_plot_broad <- DimPlot(scrna_inf,reduction = "INTE_UMAP",group.by = "int_0.3_broad") + 
+inf_plot_broad <- DimPlot(scrna,reduction = "INTE_UMAP",group.by = "int_0.3_broad_TA") + 
   ggtitle(element_blank()) + mini_umap_theme  + theme(legend.position = "bottom", legend.text = element_text(size = 20))
 ```
 
@@ -438,19 +676,22 @@ save_ggplot_formats(
 ```
 
 ```{r}
+cluster_use="int_0.3_broad_TA"
 # Define the sorting function based on the type of data in cluster_use
-help_sort_func <- if (all(is.numeric(unique(scrna@meta.data[, cluster_use])))) {
+help_sort_func <- if(all(is.numeric(unique(scrna_uninf@meta.data[, cluster_use])))) {
   function(x) as.numeric(as.character(x))
 } else {
   as.character
 }
 
+Idents(scrna_uninf) <- cluster_use
+
 # Apply the sorting function to the cluster_use column
-scrna@meta.data[, cluster_use] <- help_sort_func(scrna@meta.data[, cluster_use])
+scrna_uninf@meta.data[, cluster_use] <- help_sort_func(scrna_uninf@meta.data[, cluster_use])
 
 # Calculate cluster proportion and transpose the table
-cluster_proportion <- t(prop.table(table(scrna@meta.data$name, 
-                                         scrna@meta.data[, cluster_use]), 
+cluster_proportion <- t(prop.table(table(scrna_uninf@meta.data$name, 
+                                         scrna_uninf@meta.data[, cluster_use]), 
                                    margin = 2))
 
 # Convert to data frame and rename columns
@@ -468,39 +709,27 @@ barplot_stacked <- ggplot(cp_df, aes(x = cluster, y = proportion, fill = timepoi
 ```
 
 ```{r}
-tbl <- table(scrna$name, 
-               scrna@meta.data[, cluster_use]
-             )
-rowsums <- rowSums(tbl)
-tbl <- cbind(tbl, rowsums)
-colsums <- colSums(tbl)
-tbl <- rbind(tbl, colsums)
-
-png(file.path(plots_folder,"png/proportion_table.png"), res = 200, width = 1100, height = 450)
-p <- tableGrob(tbl, theme = ttheme_default())
-grid.arrange(p)
-dev.off()
-
-pdf(file.path(plots_folder,"pdf/proportion_table.pdf"))
-p <- tableGrob(tbl, theme = ttheme_default())
-grid.arrange(p)
-dev.off()
+generate_prop_table(scrna = scrna,
+                    table_vars = c("stage",cluster_use),
+                    name = "prop_table_inf_noc2",
+                    plots_folder = plots_folder )
 
 save_ggplot_formats(
   plt = barplot_stacked,
   base_plot_dir = plots_folder,
-  plt_name = "barplot_proportions",
+  plt_name = "barplot_proportions_TA_2",
   width = 10, height = 6
 )
 ```
 
 # Cluster proportions infected
 ```{r}
-scrna_inf@meta.data[,cluster_use] <- help_sort_func(scrna_inf@meta.data[,cluster_use])
+Idents(scrna) <- cluster_use
+scrna@meta.data[,cluster_use] <- help_sort_func(scrna@meta.data[,cluster_use])
 
 cluster_proportion <- t(prop.table(x = 
-                                     table(scrna_inf@meta.data$name,
-                                           scrna_inf@meta.data[,cluster_use]),
+                                     table(scrna@meta.data$stage,
+                                           scrna@meta.data[,cluster_use]),
                                    margin = 2)
                         )
 
@@ -525,20 +754,20 @@ barplot_stacked <- ggplot(cp.df, aes(x = cluster, y = proportion,
 ```
 
 ```{r}
-prop_tbl <- table(scrna_inf$name, 
-               scrna_inf@meta.data[, cluster_use])
+prop_tbl <- table(scrna$name, 
+               scrna@meta.data[, cluster_use])
 rowsums <- rowSums(prop_tbl)
 prop_tbl <- cbind(prop_tbl, rowsums)
 colsums <- colSums(prop_tbl)
 prop_tbl <- rbind(prop_tbl, colsums)
 
-png(file.path(plots_folder,"png/proportion_table_infected.png"), 
-    res = 200, width = 1100, height = 450)
+png(file.path(plots_folder,"png/proportion_table_infected_TA_2.png"), 
+     res = 200, width = 700, height = 350)
 p <- tableGrob(prop_tbl, theme = ttheme_default(base_size = 5))
 grid.arrange(p)
 dev.off()
 
-pdf(file.path(plots_folder,"pdf/proportion_table_infected.pdf"))
+pdf(file.path(plots_folder,"pdf/proportion_table_infected_TA_2.pdf"))
 p <- tableGrob(prop_tbl, theme = ttheme_default(base_size = 5))
 grid.arrange(p)
 dev.off()
@@ -546,18 +775,18 @@ dev.off()
 save_ggplot_formats(
   plt = barplot_stacked,
   base_plot_dir = plots_folder,
-  plt_name = "barplot_proportions_infected_legend_bottom",
+  plt_name = "barplot_proportions_infected_legend_bottom_TA_2",
   width = 10, height = 6
 )
 ```
 
 # Cluster proportions infected swapped
 ```{r}
-Idents(scrna_inf) <- "name"
-scrna_inf@meta.data[,cluster_use] <- help_sort_func(scrna_inf@meta.data[,cluster_use])
+Idents(scrna) <- "name"
+scrna@meta.data[,cluster_use] <- help_sort_func(scrna@meta.data[,cluster_use])
 
-cluster_proportion <- t(prop.table(x = table(scrna_inf@meta.data[, cluster_use],
-                                                  scrna_inf@meta.data$name),
+cluster_proportion <- t(prop.table(x = table(scrna@meta.data[, cluster_use],
+                                                  scrna@meta.data$stage),
                                         margin = 2))
 
 cluster_proportion_sort <- cluster_proportion[
@@ -583,14 +812,14 @@ barplot_stacked <- ggplot(cp.df, aes(x = timepoint, y = proportion,
 ```
 
 ```{r}
-tbl <- table(scrna_inf@meta.data[, cluster_use],
-             scrna_inf$name)
+tbl <- table(scrna@meta.data[, cluster_use],
+             scrna$name)
 rowsums <- rowSums(tbl)
 tbl <- cbind(tbl, rowsums)
 colsums <- colSums(tbl)
 tbl <- rbind(tbl, colsums)
 
-png(file.path(plots_folder,"png/table_proportions_infected_swapped.png"), 
+png(file.path(plots_folder,"png/table_proportions_infected_swapped_TA2.png"), 
     res = 200, width = 1100, height = 450)
 p <- tableGrob(tbl, theme = ttheme_default())
 grid.arrange(p)
@@ -599,29 +828,29 @@ dev.off()
 save_ggplot_formats(
   plt = barplot_stacked,
   base_plot_dir = plots_folder,
-  plt_name = "barplot_proportions_infected_swapped_legend_bottom",
+  plt_name = "barplot_proportions_infected_swapped_legend_bottom_TA2",
   width = 10, height = 6
 )
 ```
 
 ```{r}
-cluster_proportion <- t(prop.table(x = table(scrna_inf@meta.data[, cluster_use],
-                                              scrna_inf$name),
+cluster_proportion <- t(prop.table(x = table(scrna@meta.data[, cluster_use],
+                                              scrna$name),
                                         margin = 2)
                         )
 # Convert to data frame
 prop_df <- as.data.frame(cluster_proportion)
 
 # Calculate frequency percentage
-prop_df$freq_pct <- df1$Freq / as.vector(table(scrna_inf$name))
+prop_df$freq_pct <- prop_df$Freq / as.vector(table(scrna$name))
 
 # Define the number of groups and group size
 num_groups <- 5
 group_size <- 5
 
 # Calculate proportion percentages for each group using lapply
-prct_prop_list <- lapply(seq(1, nrow(df1), by = group_size), function(i) {
-  group_freq_pct <- df1$freq_pct[i:(i + group_size - 1)]
+prct_prop_list <- lapply(seq(1, nrow(prop_df), by = group_size), function(i) {
+  group_freq_pct <- prop_df$freq_pct[i:(i + group_size - 1)]
   group_freq_pct / sum(group_freq_pct)
 })
 
@@ -641,89 +870,41 @@ barplot_stacked_pct_prop <- ggplot(prop_df, aes(x = Var2,y = prct_prop,
 save_ggplot_formats(
   plt = barplot_stacked_pct_prop,
   base_plot_dir = plots_folder,
-  plt_name = "barplot_pct_prop2",
+  plt_name = "barplot_pct_prop_inf_TA",
   width = 10, height = 6
-)
-```
-
-# plot grids uninfected and infected
-```{r, fig.width = 14}
-
-Idents(scrna) <- "name"
-Idents(scrna_inf) <- "name"
-scrna_inf$name <- as.factor(scrna_inf$name)
-
-inf_plot <- DimPlot(scrna_inf,reduction = "INTE_UMAP",
-                    group.by = "name", cols = inf_cols) + 
-  ggtitle(element_blank()) + mini_umap_theme
-
-# Define a function to generate the plots
-generate_split_plot <- function(i, scrna, cols) {
-  current_level <- levels(scrna$name)[i]
-  cell_number <- table(scrna$name)[i]
-  cols.highlight <- cols[i]
-  title <- glue("{current_level}")# ({cell_number})")
-  DimPlot(scrna, 
-          label = FALSE, 
-          reduction = "INTE_UMAP", 
-          cells.highlight = WhichCells(scrna, idents = current_level),
-          cols.highlight = cols.highlight,
-          cols = "lightgrey",
-          sizes.highlight = 0.1) +
-    ggtitle(title) + mini_umap_theme & NoLegend() 
-} 
-
-# Generate a list of plots
-plot_list_uninf <- lapply(seq_along(levels(scrna$name)), 
-                    generate_split_plot, scrna = scrna, cols = uninf_cols)
-
-plot_grid_uninf <- wrap_plots(plot_list_uninf)
-
-plot_list_inf <- lapply(seq_along(levels(scrna_inf$name)), 
-                    generate_split_plot, scrna = scrna_inf, cols = inf_cols)
-
-plot_list_inf[[6]] <- DimPlot(scrna_inf, 
-                              reduction = "INTE_UMAP", group.by = "name") + 
-  ggtitle(glue("All ({sum(table(scrna_inf$stage))})")) & mini_umap_theme
-
-plot_grid_inf <- wrap_plots(plot_list_inf)
-
-print(plot_grid_inf)
-```
-
-```{r}
-save_ggplot_formats(
-  plt = plot_grid_uninf,
-  base_plot_dir = plots_folder,
-  plt_name = "plot_grid_uninf",
-  width = 8, height = 8
-)
-
-save_ggplot_formats(
-  plt = plot_grid_inf,
-  base_plot_dir = plots_folder,
-  plt_name = "plot_grid_inf_v3",
-  width = 12, height = 8
-)
-
-save_ggplot_formats(
-  plt = plot_list_inf[[3]],
-  base_plot_dir = plots_folder,
-  plt_name = "plot_d05i",
-  width = 4, height = 4
 )
 ```
 
 # Subsets
 ```{r}
-scrna_save_folder <- file.path(analysis_folder,"subset_saves")
+scrna_save_folder <- file.path(analysis_folder,"subset_saves/noc2_no11")
 dir.create(scrna_save_folder)
 
-for (ident in levels(scrna_inf)){
-  scrna_subset <- subset(scrna_inf,idents = ident)
+Idents(scrna_full_noc2) <- "int_0.3_broad_TA"
+
+for (ident in levels(scrna_full_noc2)){
+  scrna_subset <- subset(scrna_full_noc2,idents = ident)
   lower_ident <- make.names(tolower(ident))
   save_object(scrna_subset, 
               file_name =
-                file.path(scrna_save_folder,glue("scrna_{lower_ident}_inf.Rds")))
+                file.path(scrna_save_folder,
+                          glue("scrna_full_filtered_{lower_ident}_inf.Rds")))
 }
+
+Idents(scrna_full_noc2) <- "int_0.3_broad"
+
+scrna_subset <- subset(scrna_full_noc2,idents = c("Stem","Abs.Ent."))
+
+save_object(scrna_subset, 
+              file_name =
+                file.path(scrna_save_folder,
+                          glue("scrna_full_filtered_stem_ent_inf.Rds")))
+
+Idents(scrna_subset) <- "stage"
+scrna_subset <- subset(scrna_subset,idents = "d05i",invert = TRUE)
+
+save_object(scrna_subset, 
+              file_name =
+                file.path(scrna_save_folder,
+                          glue("scrna_full_filtered_stem_ent_uninf.Rds")))
 ```

@@ -1,0 +1,415 @@
+---
+title: "top 50 L2FC, uninfected, min quantile p.cutoff, max quantile 0.95"
+output:
+  html_document:
+    df_print: paged
+---
+```{r setup, include=FALSE} 
+knitr::opts_chunk$set(warning = FALSE, message = FALSE) 
+```
+
+```{r}
+library(Seurat)
+library(openxlsx)
+library(tidyverse)
+library(DESeq2)
+library(AnnotationDbi)
+library(org.Mm.eg.db)
+library(scales)
+library(grid)
+library(gridExtra)
+library(patchwork)
+library(cowplot)
+```
+
+```{r}
+harddrive <- "H:/231248/NTFS_3.64TB" 
+
+source(file.path(harddrive,"helper_functions.R"))
+source(file.path(harddrive,"aggregate_expression_functions.R"))
+source(file.path(harddrive,"scrna_datasets/save_load_helper.R"))
+source(file.path(harddrive,"scrna_datasets/single_cell_themes.R"))
+
+cluster_use <- "seurat_clusters"
+
+l2fc.cutoff <- 1
+p.cutoff <- 0.05
+
+analysis_folder <- file.path(harddrive,
+ "subsets/subsets_2025/save/noc2_no11/ent")
+
+plots_folder <- file.path(harddrive,"plots/")
+
+analysis_name <- "promedi_ent_noc2_no11"
+
+inf_cols <- c("#E08B00","#5BB300","#00C0AF","#7997FF","#FF61C9")
+uninf_cols  <- c("#E08B00","#5BB300","#7997FF","#FF61C9")
+```
+
+```{r}
+scrna <- load_object(
+  file.path(analysis_folder,"scrna_phase_clustering.Rds"))
+
+Idents(scrna) <- cluster_use
+DefaultAssay(scrna) <- "MAGIC_RNA"
+
+tab <- table(Idents(scrna))
+small_clusters <- names(tab[tab < 10])
+removed_cells <- WhichCells(scrna, idents = small_clusters)
+
+scrna <- subset(scrna, cells = removed_cells, invert = TRUE )
+```
+
+```{r}
+goblet_folder <- file.path(harddrive,
+                           "scrna_datasets/scrna_both_d25",
+                           "scrna_full_2024_both_d25_gob_pan_three",
+                           "scrna_full_2024_both_d25_gob_pan_three_inf/save")
+
+scrna_gob <- load_object(file.path(goblet_folder,
+                                      "scrna_inf_both_d25_gob.Rds"))
+
+Idents(scrna_gob) <- "stage"
+scrna_gob_uninf <- subset(scrna_gob,idents ="d05i", invert = TRUE)
+
+scrna_gob_uninf$stage <- droplevels(as.factor(scrna_gob_uninf$stage))
+
+#cluster 6 is meaningless in the uninfected. Only one cell.
+scrna_gob_uninf_no_c6 <- scrna_gob_uninf[,
+                      !scrna_gob_uninf@meta.data$integrated_snn_res.0.7 == "6"]
+
+scrna_gob_uninf_no_c6$integrated_snn_res.0.7 <- droplevels(
+  scrna_gob_uninf_no_c6$integrated_snn_res.0.7)
+Idents()
+scrna_gob_uninf_no_c6 <- RenameIdents(scrna_gob_uninf_no_c6,
+             "7" = "6") 
+```
+
+
+
+```{r}
+results.list.promedi <- readRDS(file.path(harddrive,
+  "DE_analysis/DE_LRT_promedi_stage_location_vs_other",
+  "DE_results.list_stage_location_vs_other.Rds"))
+
+results.list.promedi.filter <- lapply(results.list.promedi,function(df){
+  sigsdf <- as.data.frame(df[abs(df$log2FoldChange) >= l2fc.cutoff & 
+                               (df$padj <= p.cutoff),])
+  return(sigsdf)
+})
+
+scrna$stage <- as.factor(scrna$stage)
+
+scrna$integrated_snn_res.0.8 <- as.factor(scrna$integrated_snn_res.0.8)
+levels(scrna$integrated_snn_res.0.8) <- 
+  paste(sort(as.integer(levels(scrna$integrated_snn_res.0.8))))
+```
+
+```{r}
+# Function to select top symbols (with overlap)
+selectTopSymbols <- function(results, scrna, l2fc.cutoff, direction, top_x) {
+  
+  filter_condition <- switch(direction,
+                             "up"   = results$log2FoldChange >= l2fc.cutoff,
+                             "down" = results$log2FoldChange <= -l2fc.cutoff,
+                             stop("Invalid direction")
+                             )
+
+  selected <- results %>%
+    filter(filter_condition & padj <= p.cutoff) %>%
+    arrange(log2FoldChange) %>%
+    filter(symbol %in% rownames(scrna))
+  
+  sums <- rowSums(scrna@assays$MAGIC_RNA@data[selected$symbol,])
+  selected <- selected[which(sums != 0),] %>%
+    slice_head(n = top_x) %>%
+    pull(symbol)
+  
+  return(selected)
+}
+```
+
+```{r}
+dp_cluster <- DimPlot(scrna,reduction = "INTE_UMAP", group.by = cluster_use) + 
+  mini_umap_theme
+dp_stage <- DimPlot(scrna,reduction = "INTE_UMAP", group.by = "stage") + 
+  mini_umap_theme
+```
+
+```{r, fig.width = 20, fig.height = 5}
+dp_split <- DimPlot(scrna,reduction = "INTE_UMAP", split.by = "stage", 
+        group.by = cluster_use) & mini_umap_theme & ggtitle(element_blank())
+```
+
+```{r}
+save_ggplot_formats(
+  plt = dp_stage,
+  base_plot_dir = plots_folder,
+  plt_name = "dimplot_stage",
+  width = 7, height = 5
+)
+save_ggplot_formats(
+  plt = dp_cluster,
+  base_plot_dir = plots_folder,
+  plt_name = "dimplot_cluster",
+  width = 7, height = 5
+)
+save_ggplot_formats(
+  plt = dp_split,
+  base_plot_dir = plots_folder,
+  plt_name = "dimplot_split",
+  width = 17, height = 5
+)
+```
+
+# promedi pre-post weaning
+```{r}
+# Select top symbols without overlap for each dataset
+preWe.pro_filter <- selectTopSymbols(
+  results.list.promedi.filter$prWe.Pro_prWe.other, 
+  scrna, l2fc.cutoff, direction = "down", 50)
+
+poWe.pro_filter <- selectTopSymbols(
+  results.list.promedi.filter$poWe.Pro_poWe.other, 
+  scrna, l2fc.cutoff, direction = "down", 50)
+
+preWe.med_filter <- selectTopSymbols(
+  results.list.promedi.filter$prWe.Med_prWe.other, 
+  scrna, l2fc.cutoff, direction = "down", 50)
+
+poWe.med_filter <- selectTopSymbols(
+  results.list.promedi.filter$poWe.Med_poWe.other, 
+  scrna, l2fc.cutoff, direction = "down", 50)
+
+preWe.dis_filter <- selectTopSymbols(
+  results.list.promedi.filter$prWe.Dis_prWe.other, 
+  scrna, l2fc.cutoff, direction = "down", 50)
+
+poWe.dis_filter <- selectTopSymbols(
+  results.list.promedi.filter$poWe.Dis_poWe.other,
+  scrna, l2fc.cutoff, direction = "down", 50)
+```
+
+```{r}
+# # Check for initial overlap
+# initial_overlap <- intersect(preWe.crypts_filter, poWe.villi_filter)
+# initial_overlap2 <- intersect(preWe.villi_filter, poWe.crypts_filter)
+# 
+# # Remove overlapping symbols from both datasets
+# preWe.crypts_filter <- setdiff(preWe.crypts_filter, initial_overlap)
+# poWe.villi_filter <- setdiff(poWe.villi_filter, initial_overlap)
+# 
+# # Remove overlapping symbols from both datasets
+# preWe.villi_filter <- setdiff(preWe.villi_filter, initial_overlap2)
+# poWe.crypts_filter <- setdiff(poWe.crypts_filter, initial_overlap2)
+```
+
+```{r}
+promedi.list <- list(poWe.dis_filter,poWe.med_filter,poWe.pro_filter,
+                     preWe.dis_filter,preWe.med_filter, preWe.pro_filter)
+names(promedi.list) <- c("poWe.dis_filter","poWe.med_filter","poWe.pro_filter",
+                     "preWe.dis_filter","preWe.med_filter", "preWe.pro_filter")
+
+new.list <- lapply(promedi.list,function(Symbol){
+  Description <- mapIds(
+    org.Mm.eg.db,
+    keys = Symbol,
+    column = "GENENAME",
+    keytype = "SYMBOL",
+    multiVals = "first"
+    )
+df <- data.frame(Symbol,Description)
+return(df)
+})
+
+#write.xlsx(new.list,file=file.path(harddrive,"promedi_genes.xlsx"),rownames=FALSE)
+
+
+promedi.list <- promedi.list[c(1,3,4,6)]
+
+```
+
+```{r}
+for(i in seq_along(promedi.list)){
+  day <- paste0("aggr.exp_promedi_",names(promedi.list)[i])
+  scrna <- AddModuleScore(scrna, features = promedi.list[i], name = day)
+}
+
+ # addModule always adds 1 to the end of the names
+all_days <- paste0("aggr.exp_promedi_", names(promedi.list),1)
+
+crypts <- all_days[grep("crypts",all_days)]
+villi <- all_days[grep("villi",all_days)]
+preWe <- all_days[grep("preWe",all_days)]
+poWe <- all_days[grep("preWe",all_days)]
+```
+
+```{r}
+scrna$aggr.exp_promedi_preWe.pro_filter_10k <- 
+  scrna$aggr.exp_promedi_preWe.pro_filter1 * 10000
+scrna$aggr.exp_promedi_preWe.dis_filter_10k <- 
+  scrna$aggr.exp_promedi_preWe.dis_filter1 * 10000
+```
+
+
+```{r}
+# Step 1: Create Feature Plots with combine = TRUE for unified scales
+prWe_both_combined <- FeaturePlot(scrna, 
+                                  features = 
+                                    c("aggr.exp_promedi_preWe.pro_filter1",
+                                      "aggr.exp_promedi_preWe.dis_filter1"), 
+                                  reduction = "INTE_UMAP",
+                                  min.cutoff = "q05",
+                                  max.cutoff = "q95", 
+                                  label = FALSE,
+                                  order = TRUE,
+                                  col = c("lightgrey","red"),
+                                  ncol = 2,
+                                  slot = "scale.data",
+                                  keep.scale = "all",
+                                  combine = TRUE) & mini_umap_theme
+
+# Step 2: Split the combined plot into two separate plots
+prWe_pro_combined <- prWe_both_combined[[1]]
+prWe_dis_combined <- prWe_both_combined[[2]]
+
+# Extract the legend from the combined plot
+legend <- get_legend(prWe_both_combined)
+
+# Remove legend from both plots
+prWe_pro_combined <- prWe_pro_combined + theme(legend.position = "none") + ggtitle("proximal")
+prWe_dis_combined <- prWe_dis_combined + theme(legend.position = "none") + ggtitle("distal")
+
+# Combined plot without the legend
+combined_plot <- (prWe_pro_combined + prWe_dis_combined) + plot_layout(ncol = 2)
+
+# Create a text annotation as a plot element
+left_annotation <- wrap_elements(
+  grid::textGrob(
+    "pre weaning", 
+    rot = 90,  # Rotate text 90 degrees for vertical placement
+    gp = grid::gpar(fontsize = 7, fontface = "bold")
+  )
+)
+
+# Combine the text annotation with the plot layout and legend
+final_plot <- left_annotation + combined_plot + legend + 
+  plot_layout(ncol = 3, widths = c(0.1, 2.5, 1)) & mini_umap_theme 
+```
+
+```{r}
+#plots_folder <- "E:/figures/figure_6"
+
+save_ggplot_formats(
+            plt = final_plot ,
+            base_plot_dir = plots_folder,
+            plt_name = paste0(analysis_name,"_pre_weaning_ent_",cluster_use),
+            width = 7, height = 2.5
+            )
+```
+
+
+```{r}
+fp_custom_full <- FeaturePlot_scCustom(scrna,
+                                       features = 
+                                         rev(all_days), 
+                           reduction = "INTE_UMAP",
+                           pt.size = 5, 
+                           order = TRUE,
+                           #min.cutoff = "q05",
+                           max.cutoff = "q95",
+                           colors_use = viridis_inferno_light_high, 
+                           keep.scale = "all",
+                           figure_plot = TRUE,
+                           na_cutoff = NULL,
+                           raster = TRUE
+) & ggtitle(element_blank())
+
+save_ggplot_formats(
+            plt = fp_custom_full ,
+            base_plot_dir = plots_folder,
+            plt_name = paste0(analysis_name,"_full_no_label"),
+            width = 8, height = 7
+            )
+```
+
+
+```{r}
+#dotplot promedi.list for preWe pro and prWe dis
+
+
+# Function to integrate the annotation from a subset into the large scrna object
+annotate_from_subset <- function(scrna, scrna_subset, ident_column, 
+                                 new_ident_column) {
+  
+  # Ensure the new ident column is a copy of the original one
+  scrna[[new_ident_column]] <- scrna[[ident_column]]
+  
+  # Iterate through each identity class in the subset and transfer the annotations
+  for (ident in unique(Idents(scrna_subset))) {
+    
+    # Subset the cells of the scrna_subset for each identity
+    cells_in_subset <- WhichCells(scrna_subset, idents = ident)
+    
+    # Set the identity of the cells in the large scrna object based on the subset
+    scrna <- SetIdent(scrna, cells = cells_in_subset, value = ident)
+  }
+  
+  # Copy the updated identities into the new_ident_column
+  scrna[[new_ident_column]] <- Idents(scrna)
+  
+  return(scrna)
+}
+
+
+dp <- DotPlot_scCustom(
+      seurat_object = scrna,
+      features = genename,
+      group.by = cluster_use,
+      assay = "RNA",
+      colors_use = viridis_plasma_dark_high,
+      x_lab_rotate = TRUE
+      ) + theme(legend.text = element_text(size = 7),
+                #legend.key.size = element_text(size = 20),
+                legend.title = element_text(size = 7),
+        axis.text.x  = element_text(size = 7),
+        axis.text.y = element_text(size = 7))
+```
+
+```{r}
+save_object(scrna,file.path(analysis_folder,"scrna_inf_promedi_annotated.Rds"))
+```
+
+```{r}
+p_vln_pro <- VlnPlot(scrna,
+        features = pro,
+        pt.size = 0,
+        group.by = cluster_use,
+        same.y.lims = TRUE,
+        combine = TRUE,
+        ncol = 2,
+        sort = FALSE) &
+  theme(axis.title.x = element_blank()) & ggtitle(element_blank())
+
+p_vln_dis <- VlnPlot(scrna,
+        features = dis,
+        pt.size = 0,
+        group.by = cluster_use,
+        same.y.lims = TRUE,
+        combine = TRUE,
+        ncol = 2,
+        sort = FALSE,y.max = 0.002) &
+    theme(axis.title.x = element_blank()) & ggtitle(element_blank())
+# Removed 35 rows containing non-finite values (`stat_ydensity()`). 
+```
+
+```{r}
+vln_grid_pd <-  p_vln_pro / p_vln_dis
+
+save_ggplot_formats(
+  plt = vln_grid_pd,
+  base_plot_dir = plots_folder,
+  plt_name = paste0(analysis_name,"_fourplot_vln_independent_scale_",cluster_use),
+  width = 5, height = 5
+)
+```
