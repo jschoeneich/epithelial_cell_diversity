@@ -12,6 +12,8 @@ The analysis is separated into different parts:
 		* Bulk analysis crypts vs villi
  		* Bulk analysis of anatomical location (proximal,medial,distal)
 * Proteomics analysis using limma
+	* Analysis of overlap between proteins and genes
+	* Analyis of proteins not found in the bulk RNA-seq data using tabula muris mammary gland  		 	 		
 * Single cell analysis using Seurat
 	* Costalab single cell pipeline
  	* Single cell subset analyses
