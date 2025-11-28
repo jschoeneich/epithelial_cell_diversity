@@ -1,0 +1,142 @@
+---
+title: "Comparing TA and Stem Cell Signatures in Seurat Datasets"
+author: "Johannes Schöneich"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+# Load required libraries
+library(Seurat)
+library(ggplot2)
+library(patchwork)
+library(scCustomize)
+```
+
+## Setup and Data Loading
+
+```{r load-scripts}
+# Define project root path (adjust based on OS)
+ harddrive <- "H:/231248/NTFS_3.64TB"  # For Windows
+#harddrive <- "/media/johannes/EXTERNAL_USB/231248/NTFS_3.64TB"  # For Linux/Mac
+
+# Load custom helper scripts
+source(file.path(harddrive, "helper_functions.R"))
+source(file.path(harddrive, "scrna_datasets/save_load_helper.R"))
+source(file.path(harddrive, "scrna_datasets/single_cell_themes.R"))
+
+plots_folder <- file.path(harddrive,"stem_ta")
+```
+
+```{r load-seurat}
+# Define Seurat object locations
+mito100_path <- file.path(harddrive, "scrna_datasets/scrna_full_both_d25_mito_filter_inf/scrna_full_both_d25_mito100_inf/save")
+
+# Load Seurat objects
+scrna_mito100_inf <- load_object(file.path(mito100_path, "scrna_inf_bothd25.Rds"))
+```
+
+## Marker Definitions
+
+```{r marker-genes}
+# Transit Amplifying (TA) markers
+ta_markers <- c("Mki67", "Pcna", "Top2a", "Cdk1", "Ccnb1", "Ccnb2",
+                "Birc5", "Aurkb", "Ube2c", "Tpx2", "Stmn1", "Hmgb2",
+                "Myc", "E2f1", "Cdc20", "Tubb5")
+
+# High-confidence TA markers
+ta_markers_hc <- c("Stmn1", "Tubb5", "Zfp101", "Ube2c", "Foxm1", "Mybl2")
+
+# Intestinal stem cell markers
+stem_markers <- c("Lgr5", "Olfm4", "Ascl2", "Gkn3")
+```
+
+## Analysis for Mito100 Dataset
+
+```{r module-scores-mito}
+# Add module scores
+scrna_mito100_uninf <- subset(scrna_mito100,idents = "d05i",invert = TRUE)
+```
+
+```{r module-scores-mito}
+scrna_mito100_uninf <- AddModuleScore(scrna_mito100_uninf, features = list(ta_markers_hc), name = "TA_Score_hc")
+scrna_mito100_uninf <- AddModuleScore(scrna_mito100_uninf, features = list(stem_markers), name = "Stem_Score")
+```
+
+```{r scatter-mito}
+# Visualize score separation
+fs_mit100 <- FeatureScatter(scrna_mito100_uninf, feature1 = "Stem_Score1", feature2 = "TA_Score_hc1") +
+  ggtitle("Mito100 Dataset: TA vs Stem Score")
+
+
+save_ggplot_formats(plt = fs_mit100,
+                    plt_name = "scatter_mito100",
+                    base_plot_dir = plots_folder,
+                    width = 6,
+                    height = 5)
+```
+
+```{r annotate-mito}
+# Identify cell populations
+ta_cells_m100 <- WhichCells(scrna_mito100_uninf, expression = TA_Score_hc1 > 0.5 & Stem_Score1 < 0.3)
+stem_cells_m100 <- WhichCells(scrna_mito100_uninf, expression = Stem_Score1 > 0.3 & TA_Score_hc1 < 0.5)
+
+# Inspect phases
+table(scrna_mito100_uninf$Phase[ta_cells_m100])
+
+# Annotate refined identities
+scrna_mito100_uninf$refined_identity <- "other"
+scrna_mito100_uninf$refined_identity[ta_cells_m100] <- "Transit Amplifying"
+scrna_mito100_uninf$refined_identity[stem_cells_m100] <- "CBC Stem"
+```
+
+```{r dimplot-mito}
+dp_m100 <- DimPlot(scrna_mito100_uninf, group.by = "refined_identity", reduction = "INTE_UMAP") +
+  ggtitle("Mito100 Dataset: Refined Identities") & mini_umap_theme
+
+save_ggplot_formats(plt = dp_m100,
+                    plt_name = "UMAP_mito100",
+                    base_plot_dir = plots_folder,
+                    width = 6,
+                    height = 5)
+```
+
+```{r featureplots-mito}
+fp_ta_m100 <- FeaturePlot(scrna_mito100_uninf, features = ta_markers_hc, pt.size = 0.3,
+            reduction = "INTE_UMAP", cols = c("lightgrey", "red"),
+            order = TRUE,
+            #min.cutoff = "q05", 
+            max.cutoff = "q95", ncol = 2) & mini_umap_theme
+
+fp_stem_m100 <- FeaturePlot(scrna_mito100_uninf, features = stem_markers, pt.size = 0.3,
+            reduction = "INTE_UMAP", cols = c("lightgrey", "red"),
+            order = TRUE,
+            #min.cutoff = "q05", 
+            max.cutoff = "q95", ncol = 2) & mini_umap_theme
+
+save_ggplot_formats(plt = fp_m25_ta,
+                    plt_name = "featureplot_mito100_ta",
+                    base_plot_dir = plots_folder,
+                    width = 6,
+                    height = 8)
+
+
+save_ggplot_formats(plt = fp_m25_stem,
+                    plt_name = "featureplot_mito100_stem",
+                    base_plot_dir = plots_folder,
+                    width = 6,
+                    height = 6)
+```
+
+## Save Annotated Seurat Object
+
+```{r save-output, eval=FALSE}
+# Save annotated Seurat objects if needed
+save_object(scrna_mito100, file.path(mito100_path, "scrna_with_annotations_mito100.Rds"))
+```
+
+```{r}
+scrna <- load_object(file.path(mito25_path, "scrna_with_annotations.Rds"))
+
+```
+
