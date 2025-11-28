@@ -16,3 +16,6 @@ The analysis is separated into different parts:
 	* Costalab single cell pipeline
  	* Single cell subset analyses
  	* Transcription factor analysis using Dorothea
+  * Pseudotime analysis using slingshot
+  	* Overlap of Transcription factor acitvitiy in pseudotime
+   	* Differential expression of genes along pseudotime trajectories	 	
