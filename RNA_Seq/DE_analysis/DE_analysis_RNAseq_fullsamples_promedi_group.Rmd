@@ -17,8 +17,12 @@ library(enrichplot)
 library(patchwork)
 library(cowplot)
 library(openxlsx)
+library(scales)
+library(ggpubr)
+library(pbapply)
 
-harddrive <- "E:"
+harddrive <- "H:/231248/NTFS_3.64TB"
+
 source(file.path(harddrive,"helper_functions.R"))
 source(file.path(harddrive,"/DE_analysis/DE_helperfunctions.R"))
 ```
@@ -43,8 +47,7 @@ if (!dir.exists(analysis_folder)){
 
 #optional: read in the results.list if this analysis was already run and you want to change plots
 
-results.list_switched <- readRDS(file.path(harddrive,analysis_folder,
-                                  glue("DE_results.list_{condition}_switched.Rds")))
+results.list_switched <- readRDS(file.path(harddrive,analysis_folder,                                                                     glue("DE_results.list_{condition}_switched.Rds")))
 
 results.list <- readRDS(file.path(harddrive,analysis_folder,
                                   glue("DE_results.list_{condition}.Rds")))
@@ -77,7 +80,7 @@ combination_switch <- combination[c(2,1),] # make it so that prox is always left
 #combination <- combn(levels.sort,2)
 
 list.names <- capture.output(apply(combination_switch,2,
-                                   function(x){cat(x,sep = "_",fill = T)}))
+                                   function(x){cat(x,sep = "_",fill = TRUE)}))
 list.names <- list.names[which(list.names!="NULL")]
 
 if(!exists("results.list")){
@@ -203,339 +206,728 @@ generate_volcano_plots(results_list = results.list,
                        )
 ```
 
-```{r fig.height =  10, fig.width =  10}
-pos_color <- "#E41A1C"
-neg_color <- "#377EB8"
+# Promedi correlation analysis
+```{r}
+# We take DE genes. 
+# And we combine signature genes: 
+# DE medial vs proximal and DE medial vs distal | 
+# DE proximals vs medial DE prorximal vs distal | 
+# DE distal vs medial DE distal vs proximal (all d25)
+# 
+# then we use the variance stabilized counts (vst) 
+# from the top X [20-100, best 50+] 
+# signature genes in d25 [pmd] and do a cross-correlation against d01|d05|d10|d25 separate
 
-quantile_values <- sapply(results.list,function(x){
-  quantile(x$log2FoldChange,c(0.001,0.999))}
-  )
+vst_mat <- assay(vst(dds_fullsample))
+coldata <- as.data.frame(colData(dds_fullsample))
 
-xmin <- min(quantile_values) + 1
-xmax <- max(quantile_values) - 1
+# Average per gene/timepoint/location
+avg_expr <- vst_mat %>%
+  as.data.frame() %>%
+  tibble::rownames_to_column("gene") %>%
+  pivot_longer(-gene, names_to = "sample", values_to = "expr") %>%
+  left_join(coldata, by = c("sample" = "sample_name")) %>%
+  group_by(gene, timepoint, location) %>%
+  summarise(mean_expr = mean(expr), .groups = "drop")
+```
 
-p.cutoff <- min(sapply(results.list,function(x){
-  quantile(x[x$padj >0,]$padj,0.001)}))
+```{r}
+# Get top DE genes for each intestinal zone
+prepare_gene_sets <- function(results.list_switched, 
+                              max_num_genes = 100, 
+                              filter_criterium = "padj", 
+                              l2fc_filter = 1,
+                              extract_genes = TRUE) {
+  
+  # Filter by significance and fold change
+  res_filter <- lapply(results.list_switched, function(df) {
+    df %>%
+      as.data.frame() %>%
+      filter(abs(log2FoldChange) >= l2fc_filter & padj < 0.05)
+  })
+  
+  # Sorting function
+  sort_fun <- if (filter_criterium == "padj") {
+    function(df) arrange(df, padj)
+  } else {
+    function(df) arrange(df, desc(abs(log2FoldChange)))
+  }
+  
+  # Pre-filtered and sorted lists
+  pro_all <- bind_rows(
+    res_filter$d25.pro_d25.med %>% filter(log2FoldChange <= -l2fc_filter),
+    res_filter$d25.pro_d25.dis %>% filter(log2FoldChange <= -l2fc_filter)
+  ) %>% sort_fun() %>% distinct(symbol, .keep_all = TRUE)
+  
+  med_all <- bind_rows(
+    res_filter$d25.pro_d25.med %>% filter(log2FoldChange >= l2fc_filter),
+    res_filter$d25.med_d25.dis %>% filter(log2FoldChange <= -l2fc_filter)
+  ) %>% sort_fun() %>% distinct(symbol, .keep_all = TRUE)
+  
+  dis_all <- bind_rows(
+    res_filter$d25.med_d25.dis %>% filter(log2FoldChange >= l2fc_filter),
+    res_filter$d25.pro_d25.dis %>% filter(log2FoldChange >= l2fc_filter)
+  ) %>% sort_fun() %>% distinct(symbol, .keep_all = TRUE)
+  
+  # Remove overlaps between gene lists before slicing
+  pro_unique <- pro_all %>%
+    filter(!symbol %in% med_all$symbol, !symbol %in% dis_all$symbol)
+  
+  med_unique <- med_all %>%
+    filter(!symbol %in% pro_all$symbol, !symbol %in% dis_all$symbol)
+  
+  dis_unique <- dis_all %>%
+    filter(!symbol %in% pro_all$symbol, !symbol %in% med_all$symbol)
+  
+  # Select top N from the unique sets
+  # EDIT: we changed to non-unique
+  
+  if(extract_genes == TRUE){
+  pro_d25 <- pro_all %>% slice_head(n = max_num_genes) %>% pull(symbol)
+  med_d25 <- med_all %>% slice_head(n = max_num_genes) %>% pull(symbol)
+  dis_d25 <- dis_all %>% slice_head(n = max_num_genes) %>% pull(symbol)
+  } else{
+  pro_d25 <- pro_all %>% slice_head(n = max_num_genes)
+  med_d25 <- med_all %>% slice_head(n = max_num_genes)
+  dis_d25 <- dis_all %>% slice_head(n = max_num_genes)
+  }
+  
+  return(list(pro = pro_d25, med = med_d25, dis = dis_d25))
+}
 
-for(i in 1:length(results.list)){
-  res <- results.list[[i]]
-  res.new <- as.data.frame(res)
-  
-  #extract the names from the results.list
-  dayneg <- strsplit2(names(results.list[i]),split = "_")[1]
-  daypos <- strsplit2(names(results.list[i]),split = "_")[2]
-  
-  # identify genes that pass the threshold
-  up <- rownames(subset(res, log2FoldChange >= xmax))
-  down <- rownames(subset(res, log2FoldChange <= xmin))
-  p.up <- rownames(subset(res, padj <= p.cutoff))
-  
-  # change log2FCs in the object to be max or min cutoff 
-  res.new$log2FoldChange <- ifelse(res.new$log2FoldChange >= xmax, xmax,
-                                   ifelse(res.new$log2FoldChange <= xmin, xmin,
-                                          res.new$log2FoldChange))
-  # also change p.adj accordingly
-  res.new$padj <- ifelse(res.new$padj <= p.cutoff, p.cutoff, res.new$padj)
+# Correlations within the same zone (e.g. pro, med, dis)
 
-  #top 20
-  top20 <- res.new %>% top_n(20,log2FoldChange) %>% arrange(-log2FoldChange)
+plot_zone_correlations <- function(avg_expr, gene_sets, vst_counts,
+                                   filter_criterium = "padj", 
+                                   max_num_genes = 100,
+                                   plot_title = TRUE,
+                                   plot_name = "promedi_d25_correlation",
+                                   save_counts = TRUE) {
   
-  #bot 20
-  bot20 <- res.new %>% slice_min(log2FoldChange,n = 20) %>% arrange(-log2FoldChange)
+  color_values <- c("d01" = "#E08B00", "d05" = "#5BB300", 
+                    "d10" = "#7997FF", "d25" = "#FF61C9")
+  tps <- c("d01", "d05", "d10", "d25")
   
-  #Only those which are significant
-  top20 <- subset(top20, subset = padj < 0.05 & log2FoldChange > 1) 
-  bot20 <- subset(bot20, subset = padj < 0.05 & log2FoldChange < - 1)
+  plot_correlations <- function(zone, gene_set) {
+    dat <- avg_expr %>%
+      filter(location == zone, gene %in% gene_set) %>%
+      pivot_wider(names_from = timepoint, values_from = mean_expr)
     
-  # custom shapes for the points
-  customshape <- rep(19, nrow(res.new))
-  names(customshape) <- rep('normal', nrow(res.new))
-  customshape[which(rownames(res.new) %in% up)] <- -9658 #shape of the arrow facing right
-  names(customshape)[which(rownames(res.new) %in% up)] <- '> LFC'
-  customshape[which(rownames(res.new) %in% p.up)] <- 17 #shape of the arrow facing up
-  names(customshape)[which(rownames(res.new) %in% p.up)] <- 'padj'
-  customshape[which(rownames(res.new) %in% down)] <- -9668 #shape of the arrow facing left
-  names(customshape)[which(rownames(res.new) %in% down)] <- '< LFC'
+    lapply(tps, function(tp) {
+      df <- dat %>%
+        select(gene, !!tp) %>%
+        rename(x = !!tp) %>%
+        mutate(y = dat$d25)
+      
+      rho <- cor(df$x,
+                 df$y,
+                 method = "spearman",
+                 use = "pairwise.complete.obs")
+      
+      ggplot(df, aes(x = x, y = y)) +
+        geom_point(color = color_values[tp], size = 0.25, alpha = 0.8) +
+        geom_smooth(method = "lm",
+                    color = "#E34A33", 
+                    linewidth = 0.5,
+                    se = FALSE, 
+                    linetype = "dashed") +
+        annotate("text", 
+                 x = min(df$x, na.rm = TRUE),
+                 y = max(df$y, na.rm = TRUE),
+                 label = paste0("rho = ", round(rho, 2)),
+                 hjust = 0, 
+                 vjust = 1,
+                 size = 2,
+                 color = "black") +
+        labs(
+          x = tp,
+          y = "d25",
+          title = if (plot_title) paste(zone, tp, "vs d25") else NULL
+        ) +
+        scale_x_continuous(breaks = pretty_breaks(n = 4)) +
+        scale_y_continuous(breaks = pretty_breaks(n = 4)) +
+        theme_classic(base_size = 7) +
+        theme(
+          axis.text = element_text(size = 7, color = "black"),
+          axis.title = element_text(size = 7, color = "black"),
+          plot.title = element_text(size = 7, face = "bold", color = "black"),
+          axis.ticks = element_blank(),
+          axis.text.x = element_text(margin = margin(t = -0.5)),
+          axis.text.y = element_text(margin = margin(r = -0.5))
+        )
+    })
+  }
   
-  # custom sizes for the points
-  customsize <- rep(2.0, nrow(res.new))
-  customsize [which(rownames(res.new) %in% up)] <- 4
-  customsize [which(rownames(res.new) %in% p.up)] <- 4
-  customsize [which(rownames(res.new) %in% down)] <- 4
-  
-  keyvals <- ifelse(
-    res.new$log2FoldChange <= -1 & res.new$padj <= 0.05, neg_color,
-    ifelse(res.new$log2FoldChange  >= 1 & res.new$padj <= 0.05, pos_color,
-           'grey'))
-  
-  keyvals[is.na(keyvals)] <- 'grey'
-  names(keyvals)[keyvals == neg_color] <- glue('up in {dayneg}')
-  names(keyvals)[keyvals == 'grey'] <- 'ns'
-  names(keyvals)[keyvals == pos_color] <- glue("up in {daypos}")
-
-  #data.frame is needed for dplyr filter to work
-  df <- as.data.frame(res[c("log2FoldChange","symbol","padj")]) %>% arrange(-log2FoldChange)
-
-  up_genes <- nrow(df %>% filter(log2FoldChange >= 1 & padj <= 0.05) )
-  down_genes <- nrow(df %>% filter(log2FoldChange <= -1 & padj <= 0.05))
-  
-  plt <- EnhancedVolcano(res.new,
-                         lab = res.new$symbol,
-                         x = 'log2FoldChange',
-                         y = 'padj',
-                         xlab = bquote(~Log[2]~'FoldChange'),
-                         ylab = bquote(~-Log[10]~'Padj'),
-                         #selectLab = c(bot20$symbol,top20$symbol),
-                         #drawConnectors = T,
-                         #arrowheads = F,
-                         max.overlaps = 0,
-                         colCustom = keyvals,
-                         pCutoff = 0.05,
-                         FCcutoff = 1.0,
-                         title = glue("DE genes {dayneg} vs. {daypos}"),
-                         boxedLabels = FALSE,
-                         colAlpha = 0.5,
-                         labSize = 7,
-                         axisLabSize = 35,
-                         titleLabSize = 28,
-                         subtitleLabSize = 24,
-                         captionLabSize = 24,
-                         legendLabSize = 24,
-                         shapeCustom = customshape,
-                         pointSize = customsize,
-                         subtitle = 
-                           glue("{dayneg}:{down_genes} {daypos}:{up_genes}"),
-                         caption = paste0("total = ", nrow(res), " genes"),
-                         xlim = c(xmin,xmax)
-  )
-  
-  save_ggplot_formats(
-    plt = plt,
-    base_plot_dir = plots_folder,
-    plt_name=glue("Volcano_{dayneg}_vs_{daypos}_quantile_cutoff_{condition}"),
-    width = 14, height = 14
-  )
-  
-df2 <- df %>% filter(log2FoldChange >= 1 & padj <= 0.05 | log2FoldChange <= -1 & padj <= 0.05)
-write.csv(df2,file = file.path(charts_folder,
-                                glue("DE_{dayneg}_vs_{daypos}_{condition}.csv")),
-          row.names = F)
-}
-
-```
-
-# GO Terms with clusterProfiler
-
-```{r}
-# which ontology: choose between all, biological process (bp), molecular function (mf) 
-# and cellular component (cc).
-ont <- "bp"
-
-#p-adjust cutoff. Adjustment method is benjamini hochberg (false discovery rate)
-pcutoff <- 0.05
-
-go_plots_folder <- file.path(analysis_folder,"GO/plots")
-go_charts_folder <- file.path(analysis_folder,"GO/charts")
-
-if (!dir.exists(go_plots_folder)){
-dir.create(go_plots_folder,recursive = T)
-dir.create(go_charts_folder,recursive = T)
-}
-```
-
-## GO analysis for upregulated Genes (positive values)
-
-```{r}
-for(list.nmbr in 1:length(results.list)){
-  
-GO_NAME <- paste(names(results.list)[list.nmbr],ont,pcutoff,sep = "_")
-daypos <- strsplit2(names(results.list[list.nmbr]),split = "_")[2]
-
-print(paste("calculating",daypos,"for",GO_NAME))
-
-res <- results.list[[list.nmbr]]
-
-#UP Regulation Table
-sigsdf_UP <- res[res$log2FoldChange >= 1 & (res$padj <= 0.05),]
-
-print(paste("number of genes",nrow(sigsdf_UP)))
-
-UPgene <- sigsdf_UP$symbol
-GO_upReg_results <- enrichGO(gene          = UPgene,
-                             OrgDb         = "org.Mm.eg.db",
-                             keyType       = "SYMBOL",
-                             ont           = ont,
-                             pAdjustMethod = "BH",
-                             pvalueCutoff  = pcutoff,
-                             readable      = TRUE)
-
-  #arrange for p-value
-  GO_upReg_results@result <- arrange(GO_upReg_results@result,p.adjust)
-
-  GO_upReg_df <- as.data.frame(GO_upReg_results)
-
-  if(nrow(GO_upReg_df) == 0){
-    print(paste("No significant GO terms found for",GO_NAME))
-    next
+  zone_plots <- lapply(names(gene_sets), function(zone){
+    plot_correlations(zone, gene_sets[[zone]])
     }
-
-  write.csv(GO_upReg_df,file = file.path(go_charts_folder,
-                                     glue("GO_{daypos}_results_{GO_NAME}_{condition}.csv")),
-            row.names = F)
+    )
   
-  if(nrow(GO_upReg_df) < 30){
-    label_length = nrow(GO_upReg_df)
-    } else{label_length = 30}
+  names(zone_plots) <- names(gene_sets)
   
-  labels <- str_wrap(rev(GO_upReg_df$Description[1:label_length]),width = 40)
-  #dotplot colored by p-value and sorted reverse
-  GO_upReg_Dotplot_pvalue <- dotplot.enrichResult2(GO_upReg_results,showCategory = label_length, 
-                                                   x = "p.adjust", title = GO_NAME,
-                                                   color = "GeneRatio",font.size = 14) +
-    scale_x_reverse() + #labels = scaleFUN
-    scale_y_discrete(limits = rev(GO_upReg_df$Description[1:label_length]),labels = labels) + 
-    ggtitle(glue("GO_{daypos}_dotplot_{GO_NAME}")) + 
-    theme(legend.text = element_text(size = 16),legend.title = element_text(size=16),
-          axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1))
+  all_plots <- c(zone_plots$pro, zone_plots$med, zone_plots$dis)
   
-  save_ggplot_formats(
-    plt = GO_upReg_Dotplot_pvalue,
-    create_plot_subdir = T,
-    base_plot_dir = go_plots_folder,
-    plt_name = glue("GO_{daypos}_Dotplot_pvalue_{GO_NAME}_{condition}"),
-    width = 8, height = 12
-  )
-
-  #netplot
-  GO_upReg_Cnetplot <- cnetplot(GO_upReg_results, 
-                                 showCategory = 10,max.overlaps = Inf) +
-    ggtitle(glue("GO_{daypos}_Cnetplot_{GO_NAME}_{condition}")) +
-    theme(plot.title = element_text(hjust =  0.5,face = "bold",size = 14))
-
-  save_ggplot_formats(
-    plt = GO_upReg_Cnetplot,
-    create_plot_subdir = T,
-    base_plot_dir = go_plots_folder,
-    plt_name=glue("GO_{daypos}_Cnetplot_{GO_NAME}_{condition}"),
-    width = 12, height = 10
+  # Adjust plot size based on title presence
+  ncol <- 4
+  nrow <- 3
+  width <- ncol * 1.1 + 0.5
+  height <- nrow * (if (plot_title) 1.1 else 0.95) + 0.2
+  
+  combined <- ggarrange(plotlist = all_plots, ncol = ncol, nrow = nrow)
+  
+  final_name <- glue("{plot_name}_{filter_criterium}_",
+                     "filter_top{max_num_genes}_",
+                     "{ifelse(plot_title, 'title', 'no_title')}"
   )
   
-  if(nrow(GO_upReg_df) < 5){
-    print(paste("Not enough significant GO terms found for treeplot of",GO_NAME))
-    next
+  save_ggplot_formats(combined,
+                      base_plot_dir = plots_folder, 
+                      plt_name = final_name, 
+                      width = width,
+                      height = height)
+  
+  #Optionally save VST counts used for the figure
+  if (save_counts) {
+  wb <- createWorkbook()
+  zone_order <- c("pro", "med", "dis")  # consistent order of regions
+  tp_order <- c("d01", "d05", "d10", "d25")  # consistent order of timepoints
+  
+  for (zone in zone_order) {
+    genes <- gene_sets[[zone]]
+    zone_counts <- vst_counts[genes, , drop = FALSE]
+    
+    # Reorder columns: first by zone (pro → med → dis), 
+    # then by timepoint (d01 → d25)
+    ordered_cols <- unlist(lapply(zone_order, function(z) {
+      grep(z, colnames(zone_counts), value = TRUE)
+    }))
+    
+    # Within each zone, order by timepoint
+    ordered_cols <- unlist(lapply(ordered_cols, function(colgroup) {
+      sort(colgroup, method = "radix")
+    }))
+    
+    # Ensure we only keep existing columns in case some are missing
+    zone_counts <- zone_counts[, intersect(ordered_cols,
+                                           colnames(zone_counts)),
+                               drop = FALSE]
+    
+    addWorksheet(wb, zone)
+    writeData(wb, zone, as.data.frame(zone_counts), rowNames = TRUE)
   }
-  #treeplot
-  edox2 <- pairwise_termsim(GO_upReg_results)
-  GO_upReg_enrichtreeplot <- treeplot(edox2, showCategory = label_length) + 
-    ggtitle(glue("GO_{daypos}_enrichtreeplot_{GO_NAME}_{condition}")) + 
-    theme(plot.title = element_text(hjust =  0.5,face = "bold",size = 14))
   
-  save_ggplot_formats(
-    plt = GO_upReg_enrichtreeplot,
-    create_plot_subdir = T,
-    base_plot_dir = go_plots_folder,
-    plt_name = glue("GO_{daypos}_enrichtreeplot_{GO_NAME}_{condition}"),
-    width = 15, height = 10
+  saveWorkbook(
+    wb,
+    file = file.path(plots_folder, glue("{final_name}_vst_counts.xlsx")),
+    overwrite = TRUE
   )
 }
-```
+  combined
+}
 
-## GO analysis for DOWNregulated Genes (negative values)
+
+# Correlations between zones (e.g. pro vs med, med vs dis, etc.)
+
+plot_cross_zone_correlations <- function(avg_expr, gene_sets, vst_counts,
+                                         filter_criterium = "padj",
+                                         max_num_genes = 100,
+                                         plot_title = FALSE,
+                                         plot_name =
+                                           "promedi_crosszone_correlation",
+                                         save_counts = TRUE) {
+  
+  zones <- c("pro", "med", "dis")
+  tps <- c("d01", "d05", "d10", "d25")
+  color_values <- c("d01" = "#E08B00", "d05" = "#5BB300", 
+                    "d10" = "#7997FF", "d25" = "#FF61C9")
+  
+  plot_cross <- function(src, tgt, gene_set) {
+    src_dat <- avg_expr %>%
+      filter(location == src, gene %in% gene_set) %>%
+      pivot_wider(names_from = timepoint, values_from = mean_expr)
+    
+    tgt_dat <- avg_expr %>%
+      filter(location == tgt, gene %in% gene_set) %>%
+      pivot_wider(names_from = timepoint, values_from = mean_expr)
+    
+    lapply(tps, function(tp) {
+      df <- data.frame(x = src_dat[[tp]], y = tgt_dat[["d25"]])
+      rho <- cor(df$x, df$y, method = "spearman", 
+                 use = "pairwise.complete.obs")
+      
+      ggplot(df, aes(x = x, y = y)) +
+        geom_point(color = color_values[tp], size = 0.25, alpha = 0.8) +
+        geom_smooth(method = "lm", color = "#E34A33", linewidth = 0.5, 
+                    se = FALSE, 
+                    linetype = "dashed") +
+        annotate("text", x = min(df$x, na.rm = TRUE), y = max(df$y, 
+                                                              na.rm = TRUE),
+                 label = paste0("rho = ", round(rho, 2)), hjust = 0, 
+                 vjust = 1, size = 2) +
+        labs(
+          x = paste(src, tp),
+          y = paste(tgt, "d25"),
+          title = if (plot_title) paste(src, tp, "vs", tgt, "d25") else NULL
+        ) +
+        scale_x_continuous(breaks = pretty_breaks(n = 4)) +
+        scale_y_continuous(breaks = pretty_breaks(n = 4)) +
+        theme_classic(base_size = 7) +
+        theme(
+          axis.text = element_text(size = 7, color = "black"),
+          axis.title = element_text(size = 7, color = "black"),
+          plot.title = element_text(size = 7, face = "bold", color = "black"),
+          axis.ticks = element_blank(),
+          axis.text.x = element_text(margin = margin(t = -0.5)),
+          axis.text.y = element_text(margin = margin(r = -0.5))
+        )
+    })
+  }
+  
+  # Build all combinations in pro → med → dis order
+  cross_plots <- list()
+  for (src in zones) {
+    for (tgt in zones) {
+      if (src != tgt) {
+        cross_plots[[paste(src, "vs", tgt, sep = "_")]] <- 
+          plot_cross(src, tgt, gene_sets[[src]])
+      }
+    }
+  }
+  
+  all_plots <- unlist(cross_plots, recursive = FALSE)
+  
+  ncol <- 4
+  nrow <- 6
+  width <- ncol * 1.1 + 0.5
+  height <- nrow * (if (plot_title) 1.1 else 0.95) + 0.2
+  
+  combined <- ggarrange(plotlist = all_plots, ncol = ncol, nrow = nrow)
+  
+  final_name <- glue("{plot_name}_{filter_criterium}_",
+  "filter_top{max_num_genes}_",
+  "{ifelse(plot_title, 'title', 'no_title')}")
+  
+  save_ggplot_formats(combined, 
+                      base_plot_dir = plots_folder, 
+                      plt_name = final_name, 
+                      width = width, 
+                      height = height)
+  
+if (save_counts) {
+  wb <- createWorkbook()
+  zone_order <- c("pro", "med", "dis")
+  
+  for (src in zone_order) {
+    for (tgt in zone_order) {
+      if (src != tgt) {
+        genes <- gene_sets[[src]]
+        sub_counts <- vst_counts[genes, , drop = FALSE]
+        
+        # reorder columns by zone order if sample names contain 
+        # "pro", "med", "dis"
+        ordered_cols <- unlist(lapply(zone_order, function(z) {
+          grep(z, colnames(sub_counts), value = TRUE)
+        }))
+        
+        sub_counts <- sub_counts[, intersect(ordered_cols, 
+                                             colnames(sub_counts)), 
+                                 drop = FALSE]
+        
+        sheet_name <- paste0(src, "_vs_", tgt)
+        addWorksheet(wb, sheet_name)
+        writeData(wb, sheet_name, as.data.frame(sub_counts), rowNames = TRUE)
+      }
+    }
+  }
+  
+  saveWorkbook(
+    wb,
+    file = file.path(plots_folder, 
+                     glue("{final_name}_vst_counts.xlsx")
+                     ),
+    overwrite = TRUE
+  )
+}
+  combined
+}
+
+```
 
 ```{r}
-for(list.nmbr in 1:length(results.list)){
-  GO_NAME <- paste(names(results.list)[list.nmbr],ont,pcutoff,sep = "_")
-
-  dayneg <- strsplit2(names(results.list[list.nmbr]),split = "_")[1]
-  
-  print(paste("calculating",dayneg,"for",GO_NAME))
-  
-  res <- results.list[[list.nmbr]]
-  
-  #DOWN Regulation Table
-  sigsdf_DOWN <- res[(res$log2FoldChange <= -1) & (res$padj <= pcutoff),] 
-  
-  print(paste("number of genes",nrow(sigsdf_DOWN)))
-  DOWNgene <- (sigsdf_DOWN$symbol)
-  
-  GO_downReg_results <- enrichGO(gene = DOWNgene,
-                                OrgDb = "org.Mm.eg.db",
-                                keyType = "SYMBOL",
-                                ont = ont,
-                                pAdjustMethod = "BH",
-                                pvalueCutoff  = pcutoff,
-                                readable      = TRUE)
-
-  #arrange for p-value
-  GO_downReg_results@result<-arrange(GO_downReg_results@result,p.adjust)
-
-  GO_downReg_df <- as.data.frame(GO_downReg_results)  
-  
-  if(nrow(GO_downReg_df) == 0){
-    print(paste("No significant GO terms found for",GO_NAME))
-    next
-  }
-
-  write.csv(GO_downReg_df,file = file.path(go_charts_folder,
-              glue("GO_{dayneg}_results_{GO_NAME}_{condition}.csv"))
-            ,row.names = F)
-  
-  if(nrow(GO_downReg_df) < 30){
-    label_length = nrow(GO_downReg_df)
-    } else{label_length = 30}
-  
-  labels <- str_wrap(rev(GO_downReg_df$Description[1:label_length]),width = 40)
-  
-  #dotplot colored by p-value and sorted reverse
-  GO_downReg_Dotplot_pvalue <- dotplot.enrichResult2(GO_downReg_results,
-                                                     showCategory = label_length, 
-                                                    x = "p.adjust", title = GO_NAME,
-                          color = "GeneRatio",font.size = 14) + 
-    scale_x_reverse() + #labels=scaleFUN
-    scale_y_discrete(labels = labels, limits = rev(GO_downReg_df$Description[1:label_length])) +
-    ggtitle(glue("GO_{dayneg}_dotplot_{GO_NAME}")) + 
-    theme(legend.text = element_text(size = 16),legend.title = element_text(size=16),
-          axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1))
-  
-  
-  save_ggplot_formats(
-    plt = GO_downReg_Dotplot_pvalue,
-    create_plot_subdir = T,
-    base_plot_dir = go_plots_folder,
-    plt_name=glue("GO_{dayneg}_Dotplot_pvalue_{GO_NAME}_{condition}"),
-    width = 8, height = 12
-  )
- 
-  #netplot
-  GO_downReg_Cnetplot <- cnetplot(GO_downReg_results,
-                                 showCategory = 10,max.overlaps = Inf) +
-    ggtitle(glue("GO_{dayneg}_Cnetplot_{GO_NAME}")) +
-    theme(plot.title = element_text(hjust =  0.5,face = "bold",size = 14))
-
-  save_ggplot_formats(
-    plt = GO_downReg_Cnetplot,
-    create_plot_subdir = T,
-    base_plot_dir = go_plots_folder,
-    plt_name=glue("GO_{dayneg}_Cnetplot_{GO_NAME}_{condition}"),
-    width = 12, height = 10
-  )
-
-  if(nrow(GO_downReg_df) < 5){
-    print(paste("Not enough significant GO terms found for treeplot of",GO_NAME))
-    next
-  }
-  #treeplot
-  edox2 <- pairwise_termsim(GO_downReg_results)
-  GO_downReg_enrichtreeplot <- treeplot(edox2) + 
-    ggtitle(glue("GO_{dayneg}_enrichtreeplot_{GO_NAME}_{condition}")) +
-    theme(plot.title = element_text(hjust =  0.5,face = "bold",size = 14))
-  
-  save_ggplot_formats(
-    plt = GO_downReg_enrichtreeplot,
-    create_plot_subdir = T,
-    base_plot_dir = go_plots_folder,
-    plt_name=glue("GO_{dayneg}_enrichtreeplot_{GO_NAME}_{condition}"),
-    width = 15, height = 10
-  )
-}
+plots_folder <- file.path(plots_folder,"promedi_correlation/all_unique")
+dir.create(plots_folder)
 ```
+
+```{r}
+# Define all parameter options
+param_grid <- expand.grid(
+  max_num_genes = 50,
+  filter_criterium = "padj",
+  plot_title = c(TRUE, FALSE),
+  stringsAsFactors = FALSE
+)
+
+# Function to run one combination
+process_combination <- function(params_row) {
+  
+  params <- params_row
+  
+  cat("Processing combination:", 
+      "max_genes =", params$max_num_genes, 
+      ", filter_criterium =", params$filter_criterium, 
+      ", plot_title =", params$plot_title, "\n")
+  
+  # Prepare gene sets
+  gene_sets <- prepare_gene_sets(
+    results.list_switched,
+    max_num_genes = params$max_num_genes,
+    filter_criterium = params$filter_criterium
+  )
+  
+  # Base name for files/plots
+  base_name <- glue::glue(
+    "max{params$max_num_genes}_{params$filter_criterium}_",
+    "{ifelse(params$plot_title, 
+    'title', 'no_title')}"
+  )
+  
+  # Within-zone correlations
+  plot_zone_correlations(
+    avg_expr = avg_expr,
+    gene_sets = gene_sets,
+    vst_counts = vst_mat,
+    filter_criterium = params$filter_criterium,
+    max_num_genes = params$max_num_genes,
+    plot_title = params$plot_title,
+    plot_name = glue::glue("promedi_d25_correlation_new3"),
+    save_counts = TRUE,
+    save_rho_heatmap = TRUE,
+    plots_folder = my_plots_folder
+  )
+  
+  # # Cross-zone correlations
+  # plot_cross_zone_correlations(
+  #   avg_expr = avg_expr,
+  #   gene_sets = gene_sets,
+  #   vst_counts = vst_mat,
+  #   filter_criterium = params$filter_criterium,
+  #   max_num_genes = params$max_num_genes,
+  #   plot_title = params$plot_title,
+  #   plot_name = glue::glue("promedi_crosszone_correlation"),
+  #   save_counts = FALSE
+  # )
+}
+
+# Use pbapply to iterate over all rows with a progress bar (Windows-safe)
+pblapply(seq_len(nrow(param_grid)), function(i) {
+  process_combination(param_grid[i, ])
+})
+
+```
+
+
+```{r}
+#heatmap of all DE genes of pro/med/dis
+
+d25_list <- prepare_gene_sets(
+    results.list_switched,
+    max_num_genes = 50,
+    filter_criterium = "padj"
+  )
+
+
+d25_list_df <- prepare_gene_sets(
+    results.list_switched,
+    max_num_genes = 50,
+    filter_criterium = "padj",
+    extract_genes = FALSE
+  )
+
+# Convert Gene Symbols to Descriptions
+data_subset_list <- lapply(d25_list_df,function(gene_data){
+  convert_gene_symbols(gene_data$symbol)
+
+# Merge the descriptions back into the original data
+gene_data <- left_join(gene_data, gene_info, 
+                       by = c("symbol" = "gene_name"))
+
+data_subset <- gene_data[c("symbol","description","log2FoldChange","padj")]
+data_subset <- unique(data_subset)
+return(data_subset)
+})
+
+write.xlsx(data_subset_list,file.path(charts_folder,"promedi_correlation_list.xlsx"))
+
+d25_list_full <- prepare_gene_sets(
+    results.list_switched,
+    max_num_genes = Inf,
+    filter_criterium = "padj"
+  )
+
+genes <- unlist(d25_list,use.names = FALSE)
+
+# subset to your genes
+mat <- vst_mat[unique(genes), , drop = FALSE]
+mat <- mat[,grep("d25",colnames(mat))]
+
+# z-score per gene
+mat_scaled <- t(scale(t(mat)))
+
+# Example breaks
+breaks <- c(-2,-1,0,1,2)
+
+# Viridis palette with 3 colors (or more)
+col_fun <- colorRamp2(
+  breaks,
+  viridisLite::viridis(length(breaks))
+)
+
+desired_order <- c("pro", "med", "dis")
+
+col_order <- order(
+  factor(
+    stringr::str_extract(colnames(mat), "pro|med|dis"),
+    levels = desired_order
+  )
+)
+
+mat_scaled <- mat_scaled[, col_order]
+
+  gene_peak_bin <- max.col(mat_scaled, ties.method = "first")
+    gene_order <- order(gene_peak_bin)
+    
+    avg_scaled_ordered <- mat_scaled[gene_order, ]
+    
+    mat_clean <- avg_scaled_ordered
+    
+    # Remove rows that are all NA
+    mat_clean <- mat_clean[rowSums(is.na(mat_clean)) == 0, ]
+    
+    # Remove rows with zero variance (constant expression)
+    mat_clean <- mat_clean[apply(mat_clean, 1, sd, na.rm = TRUE) > 0, ]
+    
+    # Replace NaN or Inf
+    mat_clean[!is.finite(mat_clean)] <- 0
+
+
+# Heatmap
+hm_full <- Heatmap(
+  mat_clean,
+  name = "z-score",
+  col = col_fun,
+  cluster_rows = FALSE,
+  cluster_columns = FALSE,
+  show_row_names = TRUE,
+  show_column_names = TRUE,
+  row_names_gp = gpar(fontsize = 6)
+)
+
+save_ggplot_formats(plt = hm_full, 
+                      base_plot_dir = plots_folder, 
+                      create_plot_subdir = TRUE,
+                      plot_obj = "heatmap",
+                      plt_name = 
+                      "heatmap_all_promedi_d25_DE-genes_top50_viridis3",
+                      width = 3, 
+                      height = 9
+                    )
+```
+
+```{r}
+plot_zone_correlations <- function(
+    avg_expr,
+    gene_sets,
+    vst_counts,
+    filter_criterium,
+    max_num_genes,
+    plot_title = TRUE,
+    plot_name = "zone_corr",
+    save_counts = FALSE,
+    save_rho_heatmap = FALSE,
+    plots_folder = "."
+) {
+  
+  # Colors for points
+  color_values <- c("d01" = "#E08B00", "d05" = "#5BB300",
+                    "d10" = "#7997FF", "d25" = "#FF61C9")
+  
+  # Save all computed rho values here
+  rho_mat <- matrix(NA, nrow = 3, ncol = 4,
+                    dimnames = list(c("pro","med","dis"),
+                                    c("d01","d05","d10","d25")))
+  
+  zone_plots <- list()
+  
+  # Loop through zones (pro/med/dis)
+  for (zone in names(gene_sets)) {
+    
+    genes <- gene_sets[[zone]]
+    
+    dat <- avg_expr %>%
+      filter(location == zone, gene %in% genes) %>%
+      pivot_wider(names_from = timepoint, values_from = mean_expr)
+    
+    tps <- c("d01","d05","d10","d25")
+    
+    zone_plots[[zone]] <- map(tps, function(tp) {
+      
+      df <- dat %>%
+        select(gene, !!tp) %>%
+        rename(x = !!tp) %>%
+        mutate(y = dat$d25,
+               timepoint = tp)
+      
+      rho <- cor(df$x, df$y, method = "spearman",
+                 use = "pairwise.complete.obs")
+      
+      # Store rho value
+      rho_mat[zone, tp] <<- rho
+      
+      ggplot(df, aes(x = x, y = y)) +
+        geom_point(color = color_values[tp], size = 0.25, alpha = 0.8) +
+        geom_smooth(method = "lm", color = "#E34A33",
+                    linewidth = 0.5, se = FALSE, linetype = "dashed") +
+        annotate("text",
+                 x = min(df$x, na.rm = TRUE),
+                 y = max(df$y, na.rm = TRUE),
+                 label = paste0("rho = ", round(rho, 2)),
+                 hjust = 0, vjust = 1, size = 2) +
+        labs(
+          x = tp,
+          y = "d25",
+          title = if (plot_title) paste(zone, tp, "vs d25") else NULL
+        ) +
+        scale_x_continuous(breaks = scales::pretty_breaks(n = 4)) +
+        scale_y_continuous(breaks = scales::pretty_breaks(n = 4)) +
+        theme_classic(base_size = 7) +
+        theme(
+          axis.text = element_text(color = "black", size = 7),
+          axis.title = element_text(color = "black", size = 7),
+          plot.title = element_text(color = "black", size = 7, face = "bold"),
+          axis.ticks = element_blank(),
+          axis.text.x = element_text(margin = margin(t = -0.5)),
+          axis.text.y = element_text(margin = margin(r = -0.5))
+        )
+    })
+    
+    names(zone_plots[[zone]]) <- tps
+  }
+  
+  all_plots <- unlist(zone_plots, recursive = FALSE)
+  
+  final_name <- glue("{plot_name}_{filter_criterium}_filter_top{max_num_genes}_{if (plot_title) 'title' else 'no_title'}")
+  
+  # Auto-size panels (same logic as before)
+  width <- 4
+  height <- 3
+  
+  correlation_plots <- ggpubr::ggarrange(
+    plotlist = all_plots,
+    ncol = 4,
+    nrow = 3
+  )
+  
+  save_ggplot_formats(
+    plt = correlation_plots,
+    base_plot_dir = plots_folder,
+    plt_name = final_name,
+    width = width,
+    height = height
+  )
+  
+  # Save VST counts ------------------------------------------------------------
+  if (save_counts) {
+    wb <- createWorkbook()
+    zone_order <- c("pro", "med", "dis")  # consistent order of regions
+    tp_order <- c("d01", "d05", "d10", "d25")  # consistent order of timepoints
+    
+    for (zone in zone_order) {
+      genes <- gene_sets[[zone]]
+      zone_counts <- vst_counts[genes, , drop = FALSE]
+      
+      # Reorder columns: first by zone (pro → med → dis), 
+      # then by timepoint (d01 → d25)
+      ordered_cols <- unlist(lapply(zone_order, function(z) {
+        grep(z, colnames(zone_counts), value = TRUE)
+      }))
+      
+      # Within each zone, order by timepoint
+      ordered_cols <- unlist(lapply(ordered_cols, function(colgroup) {
+        sort(colgroup, method = "radix")
+      }))
+      
+      # Ensure we only keep existing columns in case some are missing
+      zone_counts <- zone_counts[, intersect(ordered_cols,
+                                             colnames(zone_counts)),
+                                 drop = FALSE]
+      
+      addWorksheet(wb, zone)
+      writeData(wb, zone, as.data.frame(zone_counts), rowNames = TRUE)
+    }
+    
+    saveWorkbook(
+      wb,
+      file = file.path(plots_folder, glue("{final_name}_vst_counts.xlsx")),
+      overwrite = TRUE
+    )
+  }
+  # Save rho heatmap ------------------------------------------------------------
+  if (save_rho_heatmap) {
+    
+    col_fun <- circlize::colorRamp2(
+      c(-1, 0, 1),
+      c("navy", "white", "firebrick3")
+    )
+    
+    # Add value labels inside cells
+    cell_fun <- function(j, i, x, y, w, h, fill) {
+      grid::grid.text(
+        sprintf("%.2f", rho_mat[i, j]),
+        x = x, y = y,
+        gp = grid::gpar(fontsize = 8, col = "black")
+      )
+    }
+    
+    hm <- ComplexHeatmap::Heatmap(
+      rho_mat,
+      name = "rho",
+      col = col_fun,
+      cluster_rows = FALSE,
+      cluster_columns = FALSE,
+      cell_fun = cell_fun,
+      show_row_names = TRUE,
+      show_column_names = TRUE
+    )
+    
+    save_ggplot_formats(
+      plt = hm,
+      plt_name = glue("{final_name}_rho_heatmap"),
+      base_plot_dir = plots_folder,
+      plot_obj = "heatmap",
+      width = 3,
+      height = 2
+    )
+  }
+  invisible(rho_mat)
+}
+
+my_plots_folder=plots_folder
+# Within-zone correlations
+plot_zone_correlations(
+  avg_expr = avg_expr,
+  gene_sets = gene_sets,
+  vst_counts = vst_mat,
+  filter_criterium = filter_criterium,
+  max_num_genes = max_num_genes,
+  plot_title = TRUE,
+  plot_name = glue::glue("promedi_d25_correlation_new_50_padj2"),
+  save_counts = FALSE,
+  save_rho_heatmap = TRUE,
+  plots_folder = my_plots_folder
+)
+
+```
+
+
+
+

@@ -15,7 +15,7 @@ library(clusterProfiler)
 library(DOSE)
 library(enrichplot)
 
-harddrive <- "H:"
+harddrive <- "D:/231248/NTFS_3.64TB"
 
 source(file.path(harddrive,"helper_functions.R"))
 source(file.path(harddrive,"DE_analysis/DE_helperfunctions.R"))
