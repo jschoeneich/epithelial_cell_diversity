@@ -1,0 +1,468 @@
+---
+title: "single_cell_subset_DE_GO_analysis"
+author: "Johannes Schöneich"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup}
+# The idea of this script is to do a DE/GO analysis on single cell
+# on the subsets of Absorptive Enterocytes and Goblet/Paneth
+library(circlize)
+library(clusterProfiler)
+library(DOSE)
+library(EnhancedVolcano)
+library(enrichplot)
+library(ComplexHeatmap)
+library(glue)
+library(openxlsx)
+library(patchwork)
+library(RColorBrewer)
+library(Scillus)
+library(scCustomize)
+library(Seurat)
+library(SeuratWrappers)
+library(stringr)
+library(tidyverse)
+
+harddrive <- "H:/231248/NTFS_3.64TB"
+
+source(file.path(harddrive, "scrna_datasets/save_load_helper.R"))
+source(file.path(harddrive, "scrna_datasets/single_cell_themes.R"))
+source(file.path(harddrive, "helper_functions.R"))
+source(file.path(harddrive, "DE_analysis/DE_helperfunctions.R"))
+
+analysis_folder <- file.path(harddrive, "subsets/subsets_2025/DE_GO")
+dir.create(analysis_folder, recursive = TRUE)
+```
+
+```{r}
+# Define the folder path for Enterocyte datasets
+ent_folder <- file.path(
+  harddrive,
+  "subsets/subsets_2025/save/noc2_no11/ent"  
+)
+
+# Load Enterocyte dataset
+scrna_ent_inf <- load_object(file.path(
+  ent_folder, 
+  "scrna_ent_inf_pseudotime.Rds" 
+))
+
+# Define the folder path for Goblet datasets
+goblet_folder <- file.path(
+  harddrive,
+  "subsets/subsets_2025/save/noc2/gob/"  
+)
+
+scrna_gob_inf <- load_object(file.path(
+  goblet_folder, 
+  "scrna_phase_clustering.Rds" 
+))
+```
+
+```{r}
+Idents(scrna_ent_inf) <- "stage"
+scrna_ent_uninf <- subset(scrna_ent_inf,idents = "d05i",invert = TRUE)
+
+Idents(scrna_gob_inf) <- "stage"
+scrna_gob_uninf <- subset(scrna_gob_inf,idents = "d05i",invert = TRUE)
+```
+
+```{r}
+save_object(scrna_ent_uninf,file.path(ent_folder,"scrna_ent_uninf.Rds"))
+save_object(scrna_gob_uninf,file.path(goblet_folder,"scrna_gob_uninf.Rds"))
+```
+
+
+```{r}
+Idents(scrna_gob_uninf) <- "stage"
+results_list_goblet <- calculate_results_list_presto(scrna_gob_uninf)
+
+Idents(scrna_ent_uninf) <- "stage"
+results_list_ent <- calculate_results_list_presto(scrna_ent_uninf)
+```
+
+```{r}
+plots_folder <- file.path(analysis_folder,"DE/plots")
+charts_folder <- file.path(analysis_folder,"DE/charts")
+
+GO_save_folder <- file.path(analysis_folder,"GO/saves")
+
+# Which ontology: choose between all, biological process (bp), 
+# molecular function (mf) and cellular component (cc).
+ont <- "bp"
+
+# P-adjust cutoff. Adjustment method is benjamini-hochberg (FDR)
+p.cutoff <- 0.05
+
+# The number of GO terms to compare per cluster
+topN  <- 3
+
+# Count cutoff. The low end filtering of counts
+count.cutoff <- 10
+
+# Heatmap coloring options
+pos_color_low <- "#fff5f0"
+pos_color_high <- "#E41A1C" # The color to which the significant p-values converge
+
+neg_color_low <- "#F7FBFF"
+neg_color_high <- "#377EB8"
+
+# One of GO, KEGG, Reactome or all
+comparison <- "GO"
+
+#analysis name for plot names
+NAME <- "GO_goblet"
+
+dir.create(plots_folder,recursive = TRUE)
+dir.create(charts_folder,recursive = TRUE)
+dir.create(GO_save_folder,recursive = TRUE)
+```
+
+## Volcano Plots DE genes
+
+The contrast order is always +logFC then -logFC 
+(first numerator (Zähler) then Denominator (Nenner))
+condition treated vs untreated, tells you that the estimates are of the 
+logarithmic fold change log2(treated/untreated).
+
+The level given last is the base level for the comparison. The syntax is:
+contrast <- c("condition", "level_to_compare", "base_level")
+for example, if we observe a log2 fold change of -2 this would mean 
+the gene expression is lower in the level of interest relative to the base level
+
+```{r fig.height = 10, fig.width = 10}
+generate_volcano_plots(results_list = results_list_goblet,
+                       pos_color = "#E41A1C",
+                       neg_color = "#377EB8",
+                       plots_folder = plots_folder,
+                       charts_folder = charts_folder,
+                       filename_prefix = "single_cell_goblet",
+                       do_save = TRUE)
+
+# we only need consecutive timepoints
+results_list_goblet <- results_list_goblet[c(1,4,6)]
+
+generate_volcano_plots(results_list = results_list_ent,
+                       pos_color = "#E41A1C",
+                       neg_color = "#377EB8",
+                       plots_folder = plots_folder,
+                       charts_folder = charts_folder,
+                       filename_prefix = "single_cell_enterocyte",
+                       do_save = TRUE)
+
+# we only need consecutive timepoints
+results_list_ent <- results_list_ent[c(1,4,6)]
+```
+
+# Calculate GO/Pathways and compare cluster
+```{r}
+res_up <- lapply(results_list_ent,function(df){
+  sigsdf_up <- df[(df$avg_log2FC >= 1) & (df$p_val_adj <= 0.05),]
+  upgene <- (sigsdf_up$symbol)
+  return(upgene)
+})
+
+res_down <- lapply(results_list_ent,function(df){
+  sigsdf_down <- df[(df$avg_log2FC <= - 1) & (df$p_val_adj <= 0.05),]
+  downgene <- (sigsdf_down$symbol)
+  return(downgene)
+})
+
+up_compare_GO <- compareCluster(res_up,
+                                fun = enrichGO,
+                                OrgDb = "org.Mm.eg.db",
+                                keyType = "SYMBOL",
+                                ont = ont,
+                                pAdjustMethod = "BH",
+                                pvalueCutoff  = p.cutoff,
+                                readable = TRUE
+                             )
+  
+write.csv(as.data.frame(up_compare_GO),
+            file = file.path(charts_folder,
+                             glue("up_compare_{NAME}.csv")),
+            row.names = FALSE)
+
+down_compare_GO <- compareCluster(res_down,
+  fun = enrichGO,
+  OrgDb = "org.Mm.eg.db",
+  keyType = "SYMBOL",
+  ont = ont,
+  pAdjustMethod = "BH",
+  pvalueCutoff  = p.cutoff,
+  readable = TRUE
+  )
+
+write.csv(as.data.frame(down_compare_GO),
+            file = file.path(charts_folder,
+                             glue("down_compare_{NAME}.csv")),
+            row.names = FALSE)
+```
+
+# Save results
+```{r}
+saveRDS(down_compare_GO,
+        file.path(GO_save_folder,glue("down_compare_{NAME}.Rds")))
+
+saveRDS(up_compare_GO,
+        file.path(GO_save_folder,glue("up_compare_{NAME}.Rds")))
+```
+
+```{r}
+down_compare_GO <- readRDS(file.path(GO_save_folder,glue("down_compare_{NAME}.Rds")))
+
+up_compare_GO <- readRDS(file.path(GO_save_folder,glue("up_compare_{NAME}.Rds")))
+```
+
+
+# Calculations
+```{r}
+# Filter and arrange by p-value
+up_compare_filter <- filter(up_compare_GO,
+                            Count > count.cutoff) %>% arrange(p.adjust)
+
+# -log of adjusted p.value
+up_compare_filter@compareClusterResult$p.adjust <- 
+  -log10(up_compare_filter@compareClusterResult$p.adjust)
+
+# Filter and arrange by p.value
+down_compare_filter <- filter(down_compare_GO,
+                              Count > count.cutoff) %>% arrange(p.adjust)
+
+# -log of p.value
+down_compare_filter@compareClusterResult$p.adjust <- -log10(
+  down_compare_filter@compareClusterResult$p.adjust )
+```
+
+# Maximal and minimal p-values for scales
+```{r}
+max_p <- max(down_compare_filter@compareClusterResult$p.adjust,
+                     up_compare_filter@compareClusterResult$p.adjust)
+
+if(max_p > 30){max_p <- 30}
+```
+
+# Fortify data.frames for plotting (topN)
+```{r}
+# Make data frames for plotting. Only use topN terms per Cluster
+df_up <- fortify(up_compare_filter, 
+                         showCategory = topN, split = NULL)
+df_up <- droplevels(df_up)
+
+df_down <- fortify(down_compare_filter, 
+                           showCategory = topN, split = NULL)
+df_down <- droplevels(df_down)
+
+x_labels_up <- gsub("\n"," ",levels(df_up$Cluster))
+x_labels_down <- gsub("\n"," ",levels(df_down$Cluster))
+
+levels(df_up$Cluster) <- x_labels_up
+levels(df_down$Cluster) <- x_labels_down
+```
+
+# Clustering
+```{r}
+clust_met <- "complete"
+
+markers.down <- df_down$Description %>% unique()
+markers.up <- df_up$Description %>% unique()
+
+p.mat.down <- df_down %>% 
+  filter(Description %in% markers.down) %>% 
+  dplyr::select(Description,Cluster,p.adjust) %>%
+  pivot_wider(names_from = Cluster,values_from = p.adjust) %>%
+  data.frame() # make df
+row.names(p.mat.down) <- p.mat.down$Description  # put gene in `row`
+p.mat.down <- p.mat.down[,-1] #drop gene column as now in rows
+p.mat.down[is.na(p.mat.down)] <- 0
+
+# hclust with distance matrix
+clust.down <- hclust(dist(p.mat.down %>% as.matrix()),method = clust_met) 
+
+p.mat.up <- df_up %>% 
+  filter(Description %in% markers.up) %>% 
+  dplyr::select(Description,Cluster,p.adjust) %>%
+  pivot_wider(names_from = Cluster,values_from = p.adjust) %>%
+  data.frame() # make df as tibbles -> matrix annoying
+row.names(p.mat.up) <- p.mat.up$Description  # put gene in `row`
+p.mat.up <- p.mat.up[,-1] #drop gene column as now in rows
+p.mat.up[is.na(p.mat.up)] <- 0
+
+# hclust with distance matrix
+clust.up <- hclust(dist(p.mat.up %>% as.matrix()),method = clust_met) 
+```
+
+# Plotting
+```{r}
+theme.dp <- list(
+  geom_point(),
+  theme_dose(7),
+  #coord_fixed(ratio = 1.4),
+  scale_color_gradient(low = pos_color_low,
+                       high = pos_color_high,
+                       limits = c(0,max_p)), #adjust limits
+  ylab(NULL),
+  theme(
+    axis.title = element_blank(),
+    axis.text.x = element_text(angle = 90,
+                               hjust = 1,
+                               vjust = .5),
+    axis.text.y = element_text(angle = 25,
+                               vjust = 0.5,
+                               margin = margin(r = -10) ),
+        legend.text = element_text(size = 7),
+        legend.position = "inside",
+        legend.position.inside =  c(2.7,-0.1), # GO
+        #legend.position = c(3,-0.1), # kegg
+        #legend.position = c(2.5,-0.1), # reactome
+        legend.direction = "vertical",
+        legend.box = "vertical",
+        legend.spacing.x = unit(0.05, 'cm'),
+        legend.title = element_text(size = 7),
+    legend.title.position = "top",
+        panel.background = element_rect(fill='transparent'), #transparent panel bg
+    plot.background = element_rect(fill='transparent', color = NA), #transparent plot bg
+   # panel.grid.major = element_blank(), #remove major gridlines
+   # panel.grid.minor = element_blank(), #remove minor gridlines
+    legend.background = element_rect(fill='transparent'), #transparent legend bg
+    legend.box.background = element_blank(), #transparent legend panel
+   axis.ticks = element_blank()
+  ),
+  labs(color = "-log10 (p.adjust)"),
+  guides(size = guide_legend(order = 2),
+         color = guide_colorbar(order = 1,
+                                direction = "vertical",
+                                title.theme =
+                                  element_text(
+                                    margin = margin(0, 0, 0, 0, "pt"))
+                                )
+         )
+)
+
+# GO + Pathway Up
+df_up_rc <- df_up
+
+df_up_rc$Description <- fct_relevel(df_up_rc$Description,
+                                rev(clust.up$labels[clust.up$order]))
+
+df_up_rc$Description_trunc <- sapply(df_up_rc$Description,
+                                     truncate_go_term, max_length = 30)
+
+df_up_rc$ID_desc <- paste(df_up_rc$ID,df_up_rc$Description_trunc)
+
+df_up_rc <- df_up_rc %>%
+  mutate(p.adjust = ifelse(p.adjust > max_p, max_p, p.adjust))
+
+df_up_rc <- mutate(df_up_rc, 
+                     FoldEnrichment = GeneRatio / parse_ratio(BgRatio))
+
+df_up_rc <- 
+  mutate(df_up_rc,
+    ClusterGenes = as.numeric(gsub(".*\\((\\d+)\\).*", "\\1", Cluster)),
+    Norm_GR = GeneRatio / ClusterGenes
+  )
+
+# GO + Pathway Down
+df_down_rc <- df_down
+
+df_down_rc$Description <- fct_relevel(df_down$Description,
+                                rev(clust.down$labels[clust.down$order]))
+
+df_down_rc$Description_trunc <- sapply(df_down_rc$Description,
+                                       truncate_go_term,max_length = 30)
+
+df_down_rc$ID_desc <- paste(df_down_rc$ID,df_down_rc$Description_trunc)
+
+df_down_rc <- df_down_rc %>%
+  mutate(p.adjust = ifelse(p.adjust > max_p, max_p, p.adjust))
+
+df_down_rc <- mutate(df_down_rc, 
+                     FoldEnrichment = GeneRatio / parse_ratio(BgRatio))
+
+df_down_rc <- mutate(df_down_rc,
+    ClusterGenes = as.numeric(gsub(".*\\((\\d+)\\).*", "\\1", Cluster)),
+    Norm_GR = GeneRatio / ClusterGenes
+  )
+```
+
+```{r}
+dp_up_FE <- ggplot(df_up_rc, aes(x = Cluster, 
+                                 y = Description, 
+                                 size = FoldEnrichment,
+                                 color = p.adjust,
+                                 stroke = NA)) +
+  theme.dp + scale_y_discrete(position = "right")
+
+dp_down_FE <- ggplot(df_down_rc, aes(x = Cluster,
+                                     y = Description, 
+                                     size = FoldEnrichment,
+                                     color = p.adjust, 
+                                     stroke = NA)) +
+  theme.dp + scale_y_discrete(position = "right") +
+  scale_color_gradient(low = neg_color_low,
+                       high = neg_color_high,
+                       limits = c(0,max_p))
+```
+
+# Saving
+
+## Save Plots
+```{r}
+save_ggplot_formats(
+  plt = dp_up_FE,
+  create_plot_subdir = TRUE,
+  base_plot_dir = plots_folder,
+  plt_name = glue("{NAME}_dotplot_up_rc_foldenrichment_top{topN}_",
+  "count_cutoff_{count.cutoff}_v2"),
+  width = 2.7,height = 3
+  )
+
+save_ggplot_formats(
+  plt = dp_down_FE,
+  create_plot_subdir = TRUE,
+  base_plot_dir = plots_folder,
+  plt_name = glue("{NAME}_dotplot_down_rc_foldenrichment_top{topN}_",
+  "count_cutoff_{count.cutoff}_v2"),
+  width = 2.5,height = 2
+  )
+```
+
+
+## Save Tables
+```{r}
+write.csv(as.data.frame(df_down_rc),
+            file = file.path(charts_folder,
+                             glue("down_compare_filter_{NAME}.csv")),
+            row.names = FALSE)
+
+write.csv(as.data.frame(df_up_rc),
+            file = file.path(charts_folder,
+                             glue("up_compare_filter_{NAME}.csv")),
+            row.names = FALSE)
+```
+
+
+
+```{r}
+dp1 <- DimPlot(scrna_ent_uninf,reduction = "INTE_UMAP",group.by = "stage")
+dp2 <- DimPlot(scrna_ent_uninf,reduction = "INTE_UMAP",group.by = "integrated_snn_res.0.8")
+
+save_ggplot_formats(
+  plt = dp1,
+  create_plot_subdir = TRUE,
+  base_plot_dir = plots_folder,
+  plt_name = glue("stage_plot"),
+  width = 4,height = 4
+  )
+
+save_ggplot_formats(
+  plt = dp2,
+  create_plot_subdir = TRUE,
+  base_plot_dir = plots_folder,
+  plt_name = glue("int_plot"),
+  width = 4,height = 4
+  )
+```
+

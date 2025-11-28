@@ -1,0 +1,1271 @@
+---
+title: "singlecell_subset_marker_analysis"
+author: "Johannes Schöneich"
+date: "`r Sys.Date()`"
+output: html_document
+---
+```{r setup}
+library(Seurat)
+library(RColorBrewer)
+library(scCustomize)
+library(tidyverse)
+library(openxlsx)
+library(scCustomize)
+library(patchwork)
+library(circlize)
+library(grid)
+library(stringr)
+library(maditr)
+library(glue)
+library(cowplot)
+library(SeuratWrappers)
+library(gridExtra)
+library(limma)
+library(ComplexHeatmap)
+
+#harddrive <- "/media/johannes/EXTERNAL_USB/231248/NTFS_3.64TB"
+harddrive <- "H:/231248/NTFS_3.64TB"
+
+source(file.path(harddrive, "scrna_datasets/save_load_helper.R"))
+source(file.path(harddrive, "scrna_datasets/single_cell_themes.R"))
+source(file.path(harddrive, "helper_functions.R"))
+
+plots_folder <- file.path(harddrive, "subsets/subsets_2025/plots/noc2_no11")
+charts_folder <- file.path(harddrive, "subsets/subsets_2025/charts/noc2_no11")
+dir.create(plots_folder)
+dir.create(charts_folder)
+
+
+inf_cols <- c("#E08B00","#5BB300","#00C0AF","#7997FF","#FF61C9")
+uninf_cols  <- c("#E08B00","#5BB300","#7997FF","#FF61C9")
+```
+
+# Subset folders
+```{r}
+# Define the folder path for Goblet/Paneth cell datasets
+goblet_folder <- file.path(
+  harddrive,
+  "subsets/subsets_2025/save/noc2/gob"
+)
+
+# Load Goblet/Paneth cell dataset from .Rds file
+scrna_gob <- load_object(file.path(
+  goblet_folder,
+  "scrna_phase_clustering.Rds" 
+))
+
+# Define the folder path for Enterocyte datasets
+ent_folder <- file.path(
+  harddrive,
+  "subsets/subsets_2025/save/noc2_no11/ent/"  
+)
+
+# Load Enterocyte dataset
+scrna_ent <- load_object(file.path(
+  ent_folder, 
+  #"scrna_phase_clustering.Rds" 
+  "scrna_ent_inf_pseudotime.Rds"
+))
+
+# Define the folder path for EEC (Enteroendocrine cell) datasets
+eec_folder <- file.path(
+  harddrive,
+  "subsets/subsets_2025/save/noc2/eec/"  # Subdirectory for EEC cells
+)
+
+# Load EEC dataset from .Rds file
+scrna_eec <- load_object(file.path(
+  eec_folder,
+  "scrna_phase_clustering.Rds"  # File name of the EEC scRNA object
+))
+```
+
+```{r}
+# theme for dotplos
+dp_theme <- list(theme(
+  legend.text = element_text(size = 7),
+  legend.title = element_text(size = 7),
+  axis.text.x = element_text(size = 7),
+  axis.ticks = element_blank(),
+  axis.text.y = element_text(size = 7),
+  strip.background = element_blank(),
+  legend.background = element_blank(),
+  panel.background = element_blank(), # transparent panel bg
+  plot.background = element_blank() # transparent plot bg
+))
+
+process_markers <- function(markers, n_top_genes, arrangement) {
+  markers %>%
+    group_by(cluster) %>%
+    dplyr::filter(avg_log2FC > 1 & p_val_adj < 0.05) %>%
+    {
+      if (arrangement == "avg_log2FC") {
+        # maximum fold change
+        slice_max(., avg_log2FC, n = n_top_genes)
+      } else if (arrangement == "p_val_adj") {
+        # minimum p-value
+        slice_min(., p_val_adj, n = n_top_genes)
+      }
+    } %>%
+    ungroup()
+}
+
+create_dotplot <- function(scrna_obj, markers, cluster_use, useScaled, dp_theme) {
+  DotPlot_scCustom(
+    seurat_object = scrna_obj,
+    features = unique(markers$gene),
+    group.by = cluster_use,
+    assay = "RNA",
+    colors_use = viridis_plasma_dark_high,
+    x_lab_rotate = TRUE,
+    scale = useScaled
+  ) + dp_theme
+}
+
+create_heatmap <- function(scrna_obj, markers, output_folder, 
+                           filename_prefix, suffix, plot_width) {
+  heatmap <- DoHeatmap(
+    scrna_obj,
+    features = unique(markers$gene),
+    assay = "RNA",
+    label = FALSE
+  )
+
+  save_ggplot_formats(
+    plt = heatmap,
+    base_plot_dir = output_folder,
+    plt_name = paste0(filename_prefix, "_heatmap_", suffix),
+    width = 15, height = plot_width, units = "cm"
+  )
+  heatmap
+}
+
+analyse_clusters_marker <- function(scrna,
+                                    cluster_use,
+                                    output_folder,
+                                    filename_prefix,
+                                    n_top_genes = 30,
+                                    arrangement = "avg_log2FC",
+                                    useScaled = TRUE) {
+  # Set cluster identifier
+  Idents(scrna) <- cluster_use
+
+  # Subset for specific conditions
+  scrna_uninf <- scrna[, !scrna@meta.data$stage == "d05i"]
+  scrna_neonate <- scrna_uninf[, !scrna_uninf@meta.data$name == "d25"]
+
+  # Find markers
+  markers_list <- list(
+    inf = FindAllMarkers(scrna, only.pos = TRUE),
+    uninf = FindAllMarkers(scrna_uninf, only.pos = TRUE),
+    neonate = FindAllMarkers(scrna_neonate, only.pos = TRUE)
+  )
+  # Process markers
+  markers_filtered <- lapply(markers_list, process_markers, n_top_genes, arrangement)
+
+  return(markers_filtered)
+}
+
+
+analyse_clusters_dotplot <- function(scrna,
+                                     cluster_use,
+                                     output_folder,
+                                     filename_prefix,
+                                     n_top_genes = 30,
+                                     arrangement = "avg_log2FC",
+                                     useScaled = TRUE) {
+  # Set cluster identifier
+  Idents(scrna) <- cluster_use
+
+  # Subset for specific conditions
+  scrna_uninf <- scrna[, !scrna@meta.data$stage == "d05i"]
+  scrna_neonate <- scrna_uninf[, !scrna_uninf@meta.data$name == "d25"]
+
+  # Find markers
+  markers_list <- list(
+    inf = RunPrestoAll(scrna, only.pos = TRUE),
+    uninf = RunPrestoAll(scrna_uninf, only.pos = TRUE),
+    neonate = RunPrestoAll(scrna_neonate, only.pos = TRUE)
+  )
+
+  # Process markers
+  markers_filtered <- lapply(markers_list, process_markers, 
+                             n_top_genes, arrangement)
+
+  # Calculate plot width
+  num_levels <- length(levels(Idents(scrna)))
+  plot_width <- num_levels * 12 # 8 cm per level
+
+  # Create and save dotplots
+  dotplots <- Map(
+    function(scrna_obj, markers, suffix) {
+      plot <- create_dotplot(scrna_obj, markers, cluster_use, useScaled, dp_theme)
+      save_ggplot_formats(
+        plt = plot,
+        base_plot_dir = output_folder,
+        plt_name = paste0(filename_prefix, "_dotplot_", suffix),
+        width = plot_width, height = 8, units = "cm"
+      )
+      plot
+    },
+    list(scrna, scrna_uninf, scrna_neonate),
+    markers_filtered,
+    c("inf", "uninf", "neonate")
+  )
+
+  # Create and save heatmaps
+  heatmaps <- Map(
+    function(scrna_obj, markers, suffix) {
+      create_heatmap(
+        scrna_obj, markers, output_folder, filename_prefix, suffix,
+        plot_width
+      )
+    }, list(scrna, scrna_uninf, scrna_neonate),
+    markers_filtered, c("inf", "uninf", "neonate")
+  )
+
+  # Save marker data
+  Map(function(markers, suffix) {
+    write.xlsx(markers, file = file.path(
+      output_folder,
+      paste0(
+        filename_prefix, "_top",
+        n_top_genes, "_markers_",
+        suffix, ".xlsx"
+      )
+    ))
+  }, markers_filtered, c("inf", "uninf", "neonate"))
+
+  return(list(
+    markers_inf = markers_filtered[[1]],
+    markers_uninf = markers_filtered[[2]],
+    markers_neonate = markers_filtered[[3]]
+  ))
+}
+
+analyse_clusters_dotplot_single <- function(scrna,
+                                            output_folder,
+                                            cluster_use,
+                                            filename_prefix,
+                                            n_top_genes = 30,
+                                            arrangement = "avg_log2FC",
+                                            custom_order = NULL,
+                                            useScaled = TRUE) {
+  if (is.null(custom_order)) {
+    custom_order <- levels(Idents(scrna))
+  }
+  # Set cluster identifier
+  Idents(scrna) <- cluster_use
+
+  # Find markers for each stage
+  markers <- RunPrestoAll(scrna, only.pos = TRUE)
+
+  markers_reordered <- markers %>%
+    mutate(cluster = factor(cluster, levels = custom_order)) %>%
+    arrange(cluster)
+
+  # Process markers
+  markers_filtered <- markers_reordered %>% process_markers(
+    n_top_genes = n_top_genes,
+    arrangement = arrangement
+  )
+  scrna$reorder <- scrna[[cluster_use]]
+  scrna$reorder <- factor(scrna$reorder, levels = custom_order)
+
+  # Calculate plot width
+  num_levels <- length(levels(Idents(scrna)))
+  plot_width <- num_levels * 12 # 8 cm per level
+
+  # Create and save dotplots
+  plot <- DotPlot_scCustom(
+    seurat_object = scrna,
+    features = unique(markers_filtered$gene),
+    group.by = "reorder",
+    assay = "RNA",
+    colors_use = viridis_plasma_dark_high,
+    x_lab_rotate = TRUE,
+    scale = useScaled
+  ) + dp_theme + ggtitle(filename_prefix)
+
+  save_ggplot_formats(
+    plt = plot,
+    base_plot_dir = output_folder,
+    plt_name = paste0(filename_prefix, "_dotplot_", cluster_use),
+    width = plot_width, height = 8, units = "cm"
+  )
+
+  write.xlsx(markers, file = file.path(
+    output_folder,
+    paste0(
+      filename_prefix, "_top",
+      n_top_genes, "_markers_",
+      cluster_use, ".xlsx"
+    )
+  ))
+}
+
+split_seurat_by_stage <- function(seurat_obj, stage_col = "stage") {
+  # Ensure the stage column exists in metadata
+  if (!stage_col %in% colnames(seurat_obj@meta.data)) {
+    stop(paste("Column", stage_col, "not found in metadata"))
+  }
+
+  # Get unique stages
+  stages <- levels(seurat_obj@meta.data[[stage_col]])
+
+  # Create an empty list to store split objects
+  seurat_list <- list()
+
+  # Loop over each stage and subset the Seurat object
+  for (stage in stages) {
+    seurat_list[[stage]] <- 
+      seurat_obj[, seurat_obj@meta.data[[stage_col]] == stage]
+  }
+
+  return(seurat_list)
+}
+
+
+sort_scrna_columns <- function(scrna, scrna_columns, order = c("numeric", "alphabetical")) {
+  order <- match.arg(order)
+  
+  scrna@meta.data <- scrna@meta.data %>%
+    mutate(across(all_of(scrna_columns),
+                  ~ case_when(
+                    order == "numeric" ~ fct_reorder(., as.numeric(as.character(.)), .fun = min),
+                    order == "alphabetical" ~ fct_relevel(., sort(levels(.)))
+                  )))
+  
+  return(scrna)
+}
+
+```
+
+```{r}
+# edited and customized functions from Seuratwrappers
+set_colors <- function(pal, n) {
+  if (all(pal %in% rownames(brewer.pal.info))) {
+    num <- c()
+    for (i in seq(length(pal))) {
+      num[i] <- brewer.pal.info[pal[i], ][[1]]
+    }
+    full_pal <- do.call(c, map2(.x = num, .y = pal, .f = brewer.pal))
+  } else if (all(are_colors(pal))) {
+    full_pal <- pal
+  } else {
+    stop("Incorrect palette setup. Please input valid 
+         RColorBrewer palette names or color names.")
+  }
+
+  if (n <= length(full_pal)) {
+    return(full_pal[1:n])
+  } else {
+    warning("Number of colors required exceeds palette capacity. 
+            RdYlBu spectrum will be used instead.",
+      immediate. = TRUE
+    )
+    return(colorRampPalette(brewer.pal(11, "RdYlBu"))(n))
+  }
+}
+
+are_colors <- function(x) {
+  sapply(x, function(X) {
+    tryCatch(is.matrix(col2rgb(X)),
+      error = function(e) FALSE
+    )
+  })
+}
+
+plot_hm2 <- function(dataset, markers, sort_var = c("seurat_clusters"),
+                     n = 8, anno_var, anno_colors, hm_limit = c(-2, 0, 2),
+                     # hm_colors = c("purple","black","yellow"),
+                     hm_colors = c("#4575b4", "white", "#d73027"),
+                     column_split = NULL, row_font_size = 12, ...) {
+  mat <- GetAssayData(
+    object = dataset, assay = DefaultAssay(dataset),
+    slot = "scale.data"
+  )
+  if (is.data.frame(markers)) {
+    genes <- get_top_genes(dataset, markers, n)
+  } else if (is.character(markers)) {
+    genes <- markers
+  } else {
+    stop("Incorrect input of markers")
+  }
+  
+  mat <- mat[match(genes, rownames(mat)), ]
+  anno <- dataset@meta.data %>%
+    rownames_to_column(var = "barcode") %>%
+    arrange(!!!syms(sort_var))
+  mat <- t(mat)
+  mat <- mat[match(anno$barcode, rownames(mat)), ]
+  mat <- t(mat)
+  annos <- list()
+  for (i in seq_along(1:length(anno_var))) {
+    err_msg <- paste(
+      "Incorrect specification for annotation colors for",
+      anno_var[i]
+    )
+    value <- anno[[anno_var[i]]]
+    if (is.numeric(value)) {
+      if (all(anno_colors[[i]] %in%
+              rownames(brewer.pal.info)[brewer.pal.info$category !=
+        "qual"])) {
+        n <- brewer.pal.info[anno_colors[[i]], ]["maxcolors"][[1]]
+        pal <- brewer.pal(n = n, name = anno_colors[[i]])
+        col_fun <- colorRamp2(c(
+          min(value), stats::median(value),
+          max(value)
+        ), c(pal[2], pal[(n + 1) / 2], pal[n -
+          1]))
+      } else if (length(anno_colors[[i]]) == 3 &
+                 all(are_colors(anno_colors[[i]]))) {
+        col_fun <- colorRamp2(c(
+          min(value), stats::median(value),
+          max(value)
+        ), anno_colors[[i]])
+      } else {
+        stop(err_msg)
+      }
+      ha <- HeatmapAnnotation(
+        a = anno[[anno_var[i]]],
+        col = list(a = col_fun), border = FALSE,
+        annotation_label = anno_var[i],
+        height = unit(1.5, "cm"),
+        simple_anno_size = unit(1.5, "cm"),
+        annotation_legend_param = list(
+          grid_height = unit(10, "mm"),
+          grid_width = unit(10, "mm")
+        )
+      )
+    } else {
+      l <- levels(factor(anno[[anno_var[i]]]))
+      if (all(anno_colors[[i]] %in% rownames(brewer.pal.info))) {
+        col <- set_colors(anno_colors[[i]], length(l))
+      } else if (length(anno_colors[[i]]) >= length(l) &
+        all(are_colors(anno_colors[[i]]))) {
+        col <- anno_colors[[i]]
+      } else {
+        stop(err_msg)
+      }
+      names(col) <- l
+      col <- col[!is.na(names(col))]
+      col <- list(a = col)
+      ha <- HeatmapAnnotation(
+        a = anno[[anno_var[i]]],
+        col = col, border = FALSE,
+        annotation_label = anno_var[i],
+        height = unit(1.5, "cm"),
+        simple_anno_size = unit(1.5, "cm"),
+        annotation_legend_param = list(
+          grid_height = unit(10, "mm"),
+          grid_width = unit(10, "mm")
+        )
+      )
+    }
+    names(ha) <- anno_var[i]
+    annos[[i]] <- ha
+  }
+  annos <- do.call(c, annos)
+  annos@gap <- rep(unit(1, "mm"), length(annos))
+  #
+  # if (!is.null(column_split)) {
+  #   column_split_vector <- factor(anno[[column_split]])  # Ensure it's a factor
+  # } else {
+  #   column_split_vector <- NULL
+  # }
+
+  ht <- Heatmap(mat,
+    cluster_rows = FALSE, cluster_columns = FALSE,
+    column_split = column_split, column_title_rot = 60,
+    heatmap_legend_param = list(
+      direction = "horizontal",
+      legend_width = unit(10, "cm"),
+      legend_height = unit(1.5, "cm"),
+      grid_height = unit(1, "cm"),
+      title = "Expression"
+    ),
+    col = colorRamp2(hm_limit, hm_colors), show_column_names = FALSE,
+    row_names_side = "left", row_names_gp = gpar(fontsize = row_font_size),
+    top_annotation = annos, ...
+  )
+  draw(ht, heatmap_legend_side = "bottom", annotation_legend_side = "right")
+}
+```
+
+```{r}
+generate_sorted_timepoint_vector <- function(data) {
+  # Ensure data is a matrix
+  data <- as.matrix(data)
+
+  # Generate the repeated values
+  result <- unlist(mapply(function(timepoint, counts) {
+    rep(paste0(timepoint, "_", colnames(data)), counts)
+  }, rownames(data), as.data.frame(t(data)), SIMPLIFY = FALSE))
+
+  # Extract cluster numbers from the names
+  cluster_order <- as.numeric(sub(".*_(\\d+)$", "\\1", result))
+
+  # Sort by cluster
+  result <- result[order(cluster_order)]
+
+  return(result)
+}
+
+generate_marker_gene_heatmaps <- function(dataset, markers, markers_padj,
+                                          sort_var, anno_var, anno_colors,
+                                          suffix, base_plot_dir,
+                                          split_var = "stage",
+                                          custom_order = NULL, ...) {
+  # Step 1: Generate sorted timepoint vector
+  tbl_ent <- table(dataset@meta.data[[anno_var[1]]],
+                   dataset@meta.data[[sort_var]])
+  data_matrix <- matrix(tbl_ent, ncol = ncol(tbl_ent), 
+                        dimnames = dimnames(tbl_ent))
+  col_split <- generate_sorted_timepoint_vector(data_matrix)
+
+  col_split <- generate_sorted_timepoint_vector(data_matrix)
+  col_gap <- 5 # default value, will be changed if custom order is chosen
+
+  # when we split by cluster, we need a different order for the split
+  if (split_var == "cluster") {
+    col_split <- factor(col_split, unique(col_split))
+  }
+
+  if (split_var == "custom_order") {
+    ordered_indices <- custom_order
+    suffixes <- paste0("_", ordered_indices)
+    stages <- unique(dataset@meta.data[[anno_var[1]]])
+
+    # Generate the combined order
+    ordered_columns <- unlist(lapply(stages, 
+                                     function(tp) paste0(tp, suffixes)))
+
+    # Retain only those present in col_split
+    filtered_columns <- ordered_columns[ordered_columns %in%
+                                          unique(col_split)]
+
+    col_split <- factor(col_split, filtered_columns)
+
+    # Generate table of occurrences for each stage
+    # (minus 1 to allow for the gaps in between)
+    stage_counts <- table(strsplit2(filtered_columns, "_")[, 1]) - 1
+
+    # Generate col_gap based on stage_counts
+    generate_col_gap <- function(stage_counts) {
+      # Generate the col_gap vector by repeating 0s
+      # and appending a 5 after each block
+      col_gap <- unlist(lapply(stage_counts, function(n) c(rep(0, n), 5)))
+      # Remove the last 5 to avoid an unnecessary final gap
+      if (length(col_gap) > 0) col_gap <- col_gap[-length(col_gap)]
+      return(col_gap)
+    }
+
+    # Generate col_gap using the function
+    col_gap <- generate_col_gap(stage_counts)
+  }
+
+  #col_gap = 0
+  
+  # Step 2: Create the first heatmap with markers
+  heatmap_lf2c <- plot_hm2(
+    dataset = dataset,
+    markers = markers,
+    sort_var = sort_var,
+    anno_var = anno_var,
+    anno_colors = anno_colors,
+    column_split = col_split,
+    column_gap = unit(col_gap, "mm")
+  )
+
+  # Step 3: Create the second heatmap with markers_padj
+  heatmap_padj <- plot_hm2(
+    dataset = dataset,
+    markers = markers_padj,
+    sort_var = sort_var,
+    anno_var = anno_var,
+    anno_colors = anno_colors,
+    column_split = col_split,
+    column_gap = unit(col_gap, "mm")
+  )
+
+  # Step 4: Save both heatmaps with appropriate names
+  save_ggplot_formats(
+    plt = heatmap_lf2c,
+    base_plot_dir = base_plot_dir,
+    plt_name = glue::glue("heatmap_lf2c_{suffix}"),
+    plot_obj = "heatmap",
+    width = 30,
+    height = 15
+  )
+
+  save_ggplot_formats(
+    plt = heatmap_padj,
+    base_plot_dir = base_plot_dir,
+    plt_name = glue::glue("heatmap_padj_{suffix}"),
+    plot_obj = "heatmap",
+    width = 30,
+    height = 15
+  )
+}
+```
+
+```{r}
+# Make sure all datasets use the same Seurat assay ("RNA") for consistency
+DefaultAssay(scrna_gob) <- "RNA"
+DefaultAssay(scrna_eec) <- "RNA"
+DefaultAssay(scrna_ent) <- "RNA"
+
+res_cols <- c("seurat_inte_clusters","harmony_inte_clusters",
+              "seurat_clusters",grep("^integrated_snn_res\\.0\\.[1-8]$", 
+                 colnames(scrna_ent@meta.data),value = TRUE),
+              grep("^RNA_snn_res\\.0\\.[1-8]$", 
+                 colnames(scrna_ent@meta.data),value = TRUE)
+              )
+
+scrna_ent <- sort_scrna_columns(scrna_ent, res_cols, order = "numeric")
+scrna_gob <- sort_scrna_columns(scrna_gob, res_cols, order = "numeric")
+scrna_eec <- sort_scrna_columns(scrna_eec, res_cols, order = "numeric")
+```
+
+```{r}
+# Set identities to 'stage' for easy subsetting
+Idents(scrna_ent) <- "stage"
+Idents(scrna_gob) <- "stage"
+Idents(scrna_eec) <- "stage"
+
+# Remove infected cells (d05i) from the Goblet/Paneth dataset
+scrna_ent_uninf <- subset(scrna_ent, idents = "d05i", invert = TRUE)
+scrna_ent_uninf$stage <- droplevels(as.factor(scrna_ent_uninf$stage))
+
+# Remove infected cells (d05i) from the Goblet/Paneth dataset
+scrna_gob_uninf <- subset(scrna_gob, idents = "d05i", invert = TRUE)
+scrna_gob_uninf$stage <- droplevels(as.factor(scrna_gob_uninf$stage))
+
+# Remove infected cells (d05i) from the eeclet/Paneth dataset
+scrna_eec_uninf <- subset(scrna_eec, idents = "d05i", invert = TRUE)
+scrna_eec_uninf$stage <- droplevels(as.factor(scrna_eec_uninf$stage))
+```
+
+```{r}
+Idents(scrna_ent) <- "integrated_snn_res.0.8"
+# identify small clusters and removed cells
+tab <- table(scrna_ent$integrated_snn_res.0.8)
+small_clusters <- names(tab[tab < 10])
+removed_cells <- WhichCells(scrna_ent, idents = small_clusters)
+
+# subset to keep everything but the tiny clusters
+scrna_ent_filt <- subset(scrna_ent, cells = removed_cells, invert = TRUE)
+
+# save_object(scrna_ent_filt,file.path(ent_folder,
+#                                      "scrna_ent_inf_filtered_noc2_v2.Rds"))
+
+# Set identities to 'stage' for subsetting purposes
+Idents(scrna_ent_filt) <- "stage"
+
+# Remove infected cells (d05i) from the Enterocyte dataset
+scrna_ent_uninf <- subset(scrna_ent_filt, idents = "d05i", invert = TRUE)
+scrna_ent_uninf$stage <- droplevels(as.factor(scrna_ent_uninf$stage))
+
+# Set identities to clusters for downstream analysis
+Idents(scrna_ent_uninf) <- "integrated_snn_res.0.6"
+
+scrna_ent_filt@meta.data[res_cols] <- lapply(scrna_ent_filt@meta.data[res_cols], droplevels)
+
+scrna_ent_uninf@meta.data[res_cols] <- lapply(scrna_ent_uninf@meta.data[res_cols], droplevels)
+```
+
+```{r}
+meta_columns <- c("integrated_snn_res.0.2", 
+                  "integrated_snn_res.0.3",
+                  "integrated_snn_res.0.4", 
+                  "integrated_snn_res.0.6",
+                  "integrated_snn_res.0.8",
+                  "seurat_clusters", 
+                  "stage", 
+                  "name")
+
+gob_columns <- c( 
+  "RNA_snn_res.0.7",
+                  "seurat_clusters", 
+                  "stage", 
+                  "name")
+
+walk(meta_columns, ~ make_cluster_grid(scrna_ent_uninf, 
+                                        .x,
+                                        reduction = "INTE_UMAP", 
+                                        plots_folder = plots_folder,
+                                        base_size = 3,
+                                        aspect_ratio = 1,
+                                        show_cell_numbers = TRUE,
+                                        prefix = "scrna_ent_uninf_noc2_no11")
+     )
+
+walk(gob_columns, ~ make_cluster_grid(scrna_gob_uninf, 
+                                        .x,
+                                        reduction = "harmony_UMAP", 
+                                        plots_folder = plots_folder,
+                                        base_size = 3,
+                                        aspect_ratio = 1,
+                                        show_cell_numbers = TRUE,
+                                        prefix = "scrna_gob_noc2")
+     )
+```
+
+```{r}
+Idents(scrna_eec) <- "int_0.3_broad_TA"
+scrna_eec <- scrna_eec[, !scrna_eec@meta.data$int_0.3_broad_TA == "TA"]
+scrna_eec$int_0.3_broad_TA <- droplevels(scrna_eec$int_0.3_broad_TA)
+
+# Set identities to Harmony clustering results for consistency
+Idents(scrna_eec) <- "RNA_snn_res.0.4" #0.4 to 0.8 are the same
+
+# Subset to remove infected cells (d05i) from the EEC dataset
+scrna_eec_uninf <- scrna_eec[, !scrna_eec@meta.data$name == "d05i"]
+
+# Set identities to Harmony clustering again for the uninfected subset
+Idents(scrna_eec_uninf) <- "RNA_snn_res.0.4"
+```
+
+```{r}
+#Generate UMAPS for the subsets
+eec_umap <- DimPlot(scrna_eec_uninf, 
+                    reduction = "harmony_UMAP", 
+                    group.by = "RNA_snn_res.0.6", 
+                    cols = "Set3",pt.size = 0.5) + 
+  mini_umap_theme + 
+  ggtitle(element_blank())
+
+ent_umap <- DimPlot(scrna_ent_uninf,
+  reduction = "INTE_UMAP",
+  group.by = "integrated_snn_res.0.4"
+) + mini_umap_theme + ggtitle(element_blank())
+
+ent_umap_set3 <- DimPlot(scrna_ent_uninf,
+  reduction = "INTE_UMAP",
+  group.by = "integrated_snn_res.0.4",
+  cols = RColorBrewer::brewer.pal(name = "Set3", 
+                         n= length(levels(
+                             scrna_ent_uninf$integrated_snn_res.0.4)))
+) + mini_umap_theme + ggtitle(element_blank())
+
+ent_umap_name <- DimPlot(scrna_ent_uninf,
+  reduction = "INTE_UMAP",
+  group.by = "stage", 
+  cols = uninf_cols
+) + mini_umap_theme + ggtitle(element_blank())
+
+gob_umap <- DimPlot(scrna_gob_uninf,
+  reduction = "harmony_UMAP", 
+  group.by = "RNA_snn_res.0.7", 
+  cols = "Set3",
+  pt.size = 0.5
+) + mini_umap_theme + ggtitle(element_blank())
+
+gob_umap_name <- DimPlot(scrna_gob_uninf,
+  reduction = "harmony_UMAP", 
+  group.by = "stage", 
+  cols = uninf_cols
+) + mini_umap_theme + ggtitle(element_blank())
+```
+
+```{r}
+#save the generated UMAPs into the plots_folder
+save_ggplot_formats(
+  plt = eec_umap,
+  base_plot_dir = plots_folder,
+  plt_name = "eec_umap_ptsz05",
+  width = 4, height = 3
+)
+
+save_ggplot_formats(
+  plt = gob_umap,
+  base_plot_dir = plots_folder,
+  plt_name = "gob_umap_ptsz5",
+  width = 4, height = 3
+)
+
+save_ggplot_formats(
+  plt = ent_umap,
+  base_plot_dir = plots_folder,
+  plt_name = "ent_umap_0.4_noc2_no11",
+  width = 4, height = 3
+)
+
+save_ggplot_formats(
+  plt = ent_umap_set3,
+  base_plot_dir = plots_folder,
+  plt_name = "ent_umap_0.4_noc2_no11_colorbrewer",
+  width = 4, height = 3
+)
+
+save_ggplot_formats(
+  plt = ent_umap_name,
+  base_plot_dir = plots_folder,
+  plt_name = "ent_umap_name_noc2_no11",
+  width = 4, height = 3
+)
+
+save_ggplot_formats(
+  plt = gob_umap_name,
+  base_plot_dir = plots_folder,
+  plt_name = "gob_umap_name",
+  width = 4, height = 3
+)
+```
+
+```{r}
+# Set identities for each dataset to their respective clustering results
+Idents(scrna_gob_uninf) <- "RNA_snn_res.0.7"  # Goblet/Paneth clustering
+Idents(scrna_ent_uninf) <- "integrated_snn_res.0.4"  # Enterocyte clustering
+Idents(scrna_eec_uninf) <- "RNA_snn_res.0.4"  # EEC clustering
+
+# Run Presto integration for differential expression analysis, focusing on the top genes
+
+ent_de_presto_full <- RunPrestoAll(scrna_ent_uninf)
+ent_de_presto_full <- ent_de_presto_full %>% dplyr::filter(abs(avg_log2FC) >=1 & 
+                                                             p_val_adj < 0.05)
+
+# For Goblet/Paneth cells (adjusted p-values)
+gob_de_presto_full <- RunPrestoAll(scrna_gob_uninf)
+gob_de_presto_full <- gob_de_presto_full %>% dplyr::filter(abs(avg_log2FC) >=1 & 
+                                                             p_val_adj < 0.05)
+
+# For EEC (log fold change)
+eec_de_presto_full <- RunPrestoAll(scrna_eec_uninf)
+eec_de_presto_full <- eec_de_presto_full %>% dplyr::filter(abs(avg_log2FC) >=1 & 
+                                                             p_val_adj < 0.05)
+
+```
+
+```{r}
+# For Enterocytes (differential expression based on log fold change)
+ent_de_lfc_presto <- ent_de_presto_full %>%
+  process_markers(n_top_genes = 8, arrangement = "avg_log2FC")
+
+# For Enterocytes (differential expression based on adjusted p-values)
+ent_de_padj_presto <- ent_de_presto_full %>%
+  process_markers(n_top_genes = 8, arrangement = "p_val_adj")
+
+ent_de_padj_presto <- ent_de_padj_presto  %>% group_by(cluster) %>% slice_head(n = 8)
+
+# For Goblet/Paneth cells (log fold change)
+gob_de_lfc_presto <- gob_de_presto_full %>%
+  process_markers(n_top_genes = 8, arrangement = "avg_log2FC")
+
+# For Goblet/Paneth cells (adjusted p-values)
+gob_de_padj_presto <- gob_de_presto_full %>%
+  process_markers(n_top_genes = 8, arrangement = "p_val_adj")
+
+# For EEC (log fold change)
+eec_de_lfc_presto <- eec_de_presto_full %>%
+  process_markers(n_top_genes = 8, arrangement = "avg_log2FC")
+
+# For EEC (adjusted p-values)
+eec_de_padj_presto <- eec_de_presto_full %>%
+  process_markers(n_top_genes = 8, arrangement = "p_val_adj")
+```
+
+```{r}
+write.xlsx(ent_de_presto_full,file.path(charts_folder,"ent_de_presto_full.xlsx"))
+write.xlsx(gob_de_presto_full,file.path(charts_folder,"gob_de_presto_full.xlsx"))
+write.xlsx(eec_de_presto_full,file.path(charts_folder,"eec_de_presto_full.xlsx"))
+
+write.xlsx(ent_de_padj_presto,file.path(charts_folder,"ent_de_presto_top8padj.xlsx"))
+write.xlsx(gob_de_padj_presto,file.path(charts_folder,"gob_de_presto_top8padj.xlsx"))
+write.xlsx(eec_de_padj_presto,file.path(charts_folder,"eec_de_presto_top8padj.xlsx"))
+```
+
+```{r}
+#without custom order
+# Generate marker gene heatmaps for the EEC dataset
+generate_marker_gene_heatmaps(
+  dataset = scrna_eec_uninf,  # Uninfected EEC data
+  markers = eec_de_lfc_presto$gene,  # Genes ranked by log fold change
+  markers_padj = eec_de_padj_presto$gene,  # Genes ranked by adjusted p-value
+  sort_var = "RNA_snn_res.0.4",  # Sort by the Harmony clustering result
+  anno_var = c("stage", "sub_annotation"),  # Annotation for stage and cluster
+  anno_colors = list(uninf_cols, "Set3"),  # Colors for annotations
+  suffix = "eec_presto3",  # File name suffix
+  base_plot_dir = plots_folder  # Folder to save the plots
+)
+
+# Generate marker gene heatmaps for EEC with split by cluster
+generate_marker_gene_heatmaps(
+  dataset = scrna_eec_uninf,  # Same uninfected EEC data
+  markers = eec_de_lfc_presto$gene,  # Top genes by log fold change
+  markers_padj = eec_de_padj_presto$gene,  # Top genes by adjusted p-value
+  sort_var = "RNA_snn_res.0.4",  # Sorting based on Harmony clustering
+  anno_var = c("stage", "RNA_snn_res.0.4"),  # Same annotations
+  anno_colors = list(uninf_cols, "Set3"),  # Annotation colors
+  suffix = "eec_presto_switched2",  # File name suffix
+  base_plot_dir = plots_folder,  # Save to the same folder
+  split_var = "cluster"  # Split the heatmap by cluster
+)
+
+# Generate marker gene heatmaps for the Goblet/Paneth dataset
+generate_marker_gene_heatmaps(
+  dataset = scrna_gob_uninf_no_c6, # Uninfected Goblet/Paneth 
+  markers = gob_de_lfc_presto$gene,  # Log fold change-ranked genes
+  markers_padj = gob_de_padj_presto$gene,  # Adjusted p-value-ranked genes
+  sort_var = "RNA_snn_res.0.7",  # Sorting based on clustering
+  anno_var = c("stage", "integrated_snn_res.0.7"),  # Annotations for stage and cluster
+  anno_colors = list(uninf_cols, "Set3"),  # Color scheme for annotations
+  suffix = "goblet_presto",  # File name suffix
+  base_plot_dir = plots_folder  # Folder to save the plots
+)
+
+# Generate marker gene heatmaps for the Enterocyte dataset
+generate_marker_gene_heatmaps(
+  dataset = scrna_ent_uninf,  # Uninfected Enterocyte cells
+  markers = ent_de_lfc_presto$gene,  # Top genes by log fold change
+  markers_padj = ent_de_padj_presto$gene,  # Top genes by adjusted p-value
+  sort_var = "integrated_snn_res.0.4",  # Sorting based on clustering
+  anno_var = c("stage", "integrated_snn_res.0.4"),  # Annotations for stage and cluster
+  anno_colors = list(uninf_cols, "Set3"),  # Annotation colors
+  suffix = "ent_presto",  # File name suffix for this heatmap
+  base_plot_dir = plots_folder  # Folder to save the plots
+)
+
+```
+
+```{r}
+gob_order <- c("5", "7", "2", "4", "3", "0", "6","1")
+#ent_order <- c("2", "1", "4", "10", "0","7", "5", "8","3", "9")
+ent_order <- c("4","3","7","0","6","1","5","2") # integrated_snn_res.0.4 for noc2 no11 and filtering of low clusters
+
+ent_de_lfc_presto_sort <- ent_de_lfc_presto %>% arrange(match(cluster,ent_order))
+ent_de_padj_presto_sort <- ent_de_padj_presto %>% arrange(match(cluster,ent_order))
+
+gob_de_lfc_presto_sort <- gob_de_lfc_presto %>% arrange(match(cluster,gob_order))
+gob_de_padj_presto_sort <- gob_de_padj_presto %>% arrange(match(cluster,gob_order))
+
+# Generate marker gene heatmaps for the goblet
+generate_marker_gene_heatmaps(
+  dataset = scrna_gob_uninf,
+  markers = gob_de_lfc_presto_sort$gene,
+  markers_padj = gob_de_padj_presto_sort$gene,
+  sort_var = "RNA_snn_res.0.7",
+  anno_var = c("stage", "RNA_snn_res.0.7"),
+  anno_colors = list(uninf_cols, "Set3"),
+  suffix = "gob_pan_custom_order_sort",
+  base_plot_dir = plots_folder,
+  split_var = "custom_order",
+  custom_order = gob_order
+)
+
+DefaultAssay(scrna_ent_uninf) <- "RNA" 
+
+# Generate marker gene heatmaps for the Enterocytes
+generate_marker_gene_heatmaps(
+  dataset = scrna_ent_uninf,
+  markers = ent_de_lfc_presto_sort$gene,
+  markers_padj = ent_de_padj_presto_sort$gene,
+  sort_var = "integrated_snn_res.0.4",
+  anno_var = c("stage", "integrated_snn_res.0.4"),
+  anno_colors = list(uninf_cols, "Set3"),
+  suffix = "ent_custom_order_sort",
+  base_plot_dir = plots_folder,
+  split_var = "custom_order",
+  custom_order = ent_order
+)
+```
+
+
+```{r}
+# Generate marker gene heatmaps for the EEC dataset
+generate_marker_gene_heatmaps(
+  dataset = scrna_eec_uninf,  # Uninfected EEC data
+  markers = eec_de_lfc_presto$gene,  # Genes ranked by log fold change
+  markers_padj = eec_de_padj_presto$gene,  # Genes ranked by adjusted p-value
+  sort_var = "RNA_snn_res.0.6",  # Sort by the Harmony clustering result
+  anno_var = c("stage", "RNA_snn_res.0.6"),  # Annotation for name and cluster
+  anno_colors = list(uninf_cols, "Set3"),  # Colors for annotations
+  suffix = "eec_custom_order_v2",  # Suffix for file names
+  base_plot_dir = plots_folder,  # Folder to save the plots
+  split_var = "custom_order",
+  custom_order = levels(scrna_eec_uninf)
+)
+```
+
+# dotplots
+```{r}
+# Perform cluster analysis and generate dotplots
+
+# goblet
+scrna_gob_analysis <- analyse_clusters_dotplot(
+  scrna = scrna_gob,
+  cluster_use = "integrated_snn_res.0.7",
+  output_folder = plots_folder,
+  arrangement = "p_val_adj",
+  filename_prefix = "gp_analysis_padj_res.0.7",
+  n_top_genes = 30
+)
+
+# enterocytes
+scrna_ent_analysis <- analyse_clusters_dotplot(
+  scrna = scrna_ent,
+  cluster_use = "integrated_snn_res.0.8",
+  output_folder = plots_folder,
+  arrangement = "p_val_adj",
+  filename_prefix = "ent_analysis_padj_res.0.8",
+  n_top_genes = 30
+)
+
+# EEC
+scrna_eec_analysis <- analyse_clusters_dotplot(
+  scrna = scrna_eec,
+  cluster_use = "RNA_snn_res.0.4",
+  output_folder = plots_folder,
+  arrangement = "p_val_adj",
+  filename_prefix = "eec_analysis_padj_res.0.6",
+  n_top_genes = 30
+)
+```
+
+```{r}
+# generate proportion tables for the new uninfected
+generate_prop_table(scrna_gob_uninf,
+  table_vars = c("stage", "RNA_snn_res.0.7"),
+  name = "goblet_uninf",
+  plots_folder = plots_folder
+)
+
+generate_prop_table(scrna_ent_uninf,
+  table_vars = c("stage", "integrated_snn_res.0.4"),
+  name = "ent_uninf",
+  plots_folder = plots_folder
+)
+
+generate_prop_table(scrna_eec_uninf,
+  table_vars = c("stage", "RNA_snn_res.0.4"),
+  name = "eec_uninf",
+  plots_folder = plots_folder
+)
+```
+
+# Generate split dotplots
+```{r}
+gob_list <- split_seurat_by_stage(scrna_gob_uninf_no_c6)
+eec_list <- split_seurat_by_stage(scrna_eec_uninf, stage_col = "stage")
+ent_list <- split_seurat_by_stage(scrna_ent_uninf)
+```
+
+```{r}
+# split dotplots. The idea is that we generate a specific dotplot for each timepoint
+
+# the function takes as input a seurat scrna object and various parts like the 
+# cluster which shall be used for the dotplot and if there is 
+# a specific custom order (i.e. we want the dotplot in a different order then the default numeric one )
+
+for (i in 1:length(gob_list)) {
+  prefix <- names(gob_list)[i]
+  analyse_clusters_dotplot_single(
+    scrna = gob_list[[i]],
+    cluster_use = "integrated_snn_res.0.7",
+    output_folder = plots_folder,
+    arrangement = "p_val_adj",
+    filename_prefix = glue("goblet_{prefix}_reorder"),
+    custom_order = gob_order,
+    n_top_genes = 30
+  )
+}
+
+for (i in 1:length(ent_list)) {
+  prefix <- names(ent_list)[i]
+  analyse_clusters_dotplot_single(
+    scrna = ent_list[[i]],
+    cluster_use = "integrated_snn_res.0.8",
+    output_folder = plots_folder,
+    arrangement = "p_val_adj",
+    custom_order = ent_order,
+    filename_prefix = glue("abs.ent._{prefix}_reorder"),
+    n_top_genes = 30
+  )
+}
+
+for (i in 1:length(eec_list)) {
+  prefix <- names(eec_list)[i]
+  analyse_clusters_dotplot_single(
+    scrna = eec_list[[i]],
+    cluster_use = "RNA_snn_res.0.6",
+    output_folder = plots_folder,
+    arrangement = "p_val_adj",
+    filename_prefix = glue("eec_{prefix}"),
+    n_top_genes = 30
+  )
+}
+```
+
+```{r}
+Idents(scrna_gob_uninf_no_c6) <- "stage"
+Idents(scrna_ent_uninf) <- "stage"
+
+scrna_gob_uninf_neonate <- subset(scrna_gob_uninf_no_c6,
+                                  idents = "d25", invert = TRUE)
+scrna_gob_uninf_d05_10 <- subset(scrna_gob_uninf_no_c6, 
+                                 idents = c("d05", "d10"))
+
+scrna_ent_uninf_neonate <- subset(scrna_ent_uninf, 
+                                  idents = "d25", invert = TRUE)
+scrna_ent_uninf_d05_10 <- subset(scrna_ent_uninf,
+                                 idents = c("d05", "d10"))
+```
+
+```{r}
+analyse_clusters_dotplot_single(
+  scrna = scrna_gob_uninf_no_c6,
+  cluster_use = "integrated_snn_res.0.7",
+  output_folder = plots_folder,
+  arrangement = "p_val_adj",
+  filename_prefix = "goblet_uninf_reorder",
+  custom_order = gob_order,
+  n_top_genes = 30
+)
+
+analyse_clusters_dotplot_single(
+  scrna = scrna_gob_uninf_neonate,
+  cluster_use = "integrated_snn_res.0.7",
+  output_folder = plots_folder,
+  arrangement = "p_val_adj",
+  filename_prefix = "goblet_neonate_reorder",
+  custom_order = gob_order,
+  n_top_genes = 30
+)
+
+analyse_clusters_dotplot_single(
+  scrna = scrna_gob_uninf_d05_10,
+  cluster_use = "integrated_snn_res.0.7",
+  output_folder = plots_folder,
+  arrangement = "p_val_adj",
+  filename_prefix = "goblet_d05_d10_reorder",
+  custom_order = gob_order,
+  n_top_genes = 30
+)
+```
+
+```{r}
+analyse_clusters_dotplot_single(
+  scrna = scrna_ent_uninf,
+  cluster_use = "integrated_snn_res.0.8",
+  output_folder = plots_folder,
+  arrangement = "p_val_adj",
+  custom_order = ent_order,
+  filename_prefix = "abs.ent._uninf_reorder",
+  n_top_genes = 30
+)
+
+analyse_clusters_dotplot_single(
+  scrna = scrna_ent_uninf_neonate,
+  cluster_use = "integrated_snn_res.0.8",
+  output_folder = plots_folder,
+  arrangement = "p_val_adj",
+  custom_order = ent_order,
+  filename_prefix = "abs.ent._neonate_reorder",
+  n_top_genes = 30
+)
+
+analyse_clusters_dotplot_single(
+  scrna = scrna_ent_uninf_d05_10,
+  cluster_use = "integrated_snn_res.0.8",
+  output_folder = plots_folder,
+  arrangement = "p_val_adj",
+  custom_order = ent_order,
+  filename_prefix = "abs.ent._d05_d10_reorder",
+  n_top_genes = 30
+)
+```
+
+# zg16 expression
+```{r}
+# We want specifically in the Goblet and Paneth Subset Zg16 and Lyz1 Expression
+
+gob_zg16_lyz1 <- FeaturePlot(scrna_gob_uninf,
+  features = c("Zg16", "Lyz1"),
+  reduction = "harmony_UMAP",
+  min.cutoff = "q05",
+  max.cutoff = "q95",
+  label = FALSE,
+  order = TRUE,
+  col = c("lightgrey", "red"),
+  ncol = 1,
+  # slot = "scale.data",
+  # keep.scale ="all",
+  combine = TRUE
+) & mini_umap_theme
+
+gob_zg16_lyz1_inferno <- FeaturePlot_scCustom(scrna_goblet,
+  features = c("Zg16", "Lyz1"),
+  reduction = "harmony_UMAP",
+  min.cutoff = "q05",
+  max.cutoff = "q95",
+  label = FALSE,
+  order = TRUE,
+  col = viridis_inferno_light_high,
+  num_columns = 1,
+  # slot = "scale.data",
+  # keep.scale ="all",
+  combine = TRUE
+) & mini_umap_theme
+
+gob_zg16_defa24 <- FeaturePlot(scrna_gob_uninf,
+  features = c("Zg16", "Defa24"),
+  reduction = "harmony_UMAP",
+  min.cutoff = "q05",
+  max.cutoff = "q95",
+  label = FALSE,
+  order = TRUE,
+  col = c("lightgrey", "red"),
+  ncol = 1,
+  # slot = "scale.data",
+  # keep.scale ="all",
+  combine = TRUE
+) & mini_umap_theme
+
+gob_zg16_defa24_inferno <- FeaturePlot_scCustom(scrna_gob_uninf,
+  features = c("Zg16", "Defa24"),
+  reduction = "harmony_UMAP",
+  #min.cutoff = "q05",
+  max.cutoff = "q95",
+  label = FALSE,
+  order = TRUE,
+  col = viridis_inferno_light_high,
+  pt.size = 0.5,
+  num_columns = 1,
+  # slot = "scale.data",
+  # keep.scale ="all",
+  combine = TRUE
+) & mini_umap_theme
+
+
+###------------------
+
+
+save_ggplot_formats(
+  plt = gob_zg16_defa24,
+  base_plot_dir = plots_folder,
+  plt_name = "goblet_zg16_defa24",
+  width = 3, height = 5
+)
+
+save_ggplot_formats(
+  plt = gob_zg16_defa24_inferno,
+  base_plot_dir = plots_folder,
+  plt_name = "goblet_zg16_defa24_inferno_v2",
+  width = 3, height = 5
+)
+
+save_ggplot_formats(
+  plt = gob_zg16_lyz1,
+  base_plot_dir = plots_folder,
+  plt_name = "goblet_zg16_lyz1",
+  width = 3, height = 5
+)
+
+save_ggplot_formats(
+  plt = gob_zg16_lyz1_inferno,
+  base_plot_dir = plots_folder,
+  plt_name = "goblet_zg16_lyz1_inferno_v3",
+  width = 3, height = 5
+)
+```
