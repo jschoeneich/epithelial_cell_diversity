@@ -19,7 +19,7 @@ library(ReactomePA)
 
 # Adjustments
 ```{r}
-harddrive  <- "H:"
+harddrive  <- "D:/231248/NTFS_3.64TB" 
 
 source(file.path(harddrive,"helper_functions.R"))
 source(file.path(harddrive,"DE_analysis/DE_helperfunctions.R"))
@@ -47,7 +47,7 @@ pathway_save_folder <- file.path(analysis_folder,
                           "Pathway/saves/")
 
 # The number of GO terms to compare
-topN <- 10
+topN <- 4
 
 # Count cutoff. The low end filtering of counts
 count.cutoff <- 10
@@ -62,10 +62,10 @@ neg_color_high <- "#377EB8"
 # One of GO, KEGG, Reactome or all
 # if you choose all, you need to loop through them manually 
 # See lines 160/161 for this
-comparison <- "all"
+comparison <- "GO"
 
 #analysis name for plot names
-NAME <- "GO_FE"
+NAME <- glue("GO_FE_top_{topN}")
 
 cv.names <- c("d01.crypts_d05.crypts","d05.crypts_d10.crypts",
               "d10.crypts_d25.crypts","d01.villi_d05.villi",
@@ -443,42 +443,63 @@ clust.up <- hclust(dist(p.mat.up %>% as.matrix()),method = clust_met)
 #Plotting
 ```{r}
 theme.dp_cv <- list(
-  geom_point(),
+  # 1. Geoms
+  geom_point(stroke = 0),
+  
+  # 2. Facets & scales
   theme_dose(7),
-  facet_grid(~ State, scales = "free",space = "free",switch = "y"),
-  scale_color_gradient(low = pos_color_low,
-                       high = pos_color_high,
-                       limits = c(0,max_p_cv)), #adjust limits
-  scale_size_continuous(limits = c(min_gr_cv,max_gr_cv)),  #adjust limits
-  ylab(NULL),
-  theme(axis.title = element_blank(),
-        axis.text.x = element_text(angle = 90,
-                                   hjust = 1,
-                                   vjust = .5),
-        axis.ticks = element_blank(),
-        #panel.spacing = unit(x = 0.1, units = "cm"),
-        strip.background = element_blank(),
-        strip.placement = "outside",
-        strip.text = element_text(face = "bold",size = 7),
-        legend.text = element_text(size = 7),
-        legend.title = element_text(size = 7),
-        #legend.position = c(4.5,-0.1), # reactome
-        legend.position = "inside",
-        legend.position.inside =  c(2,-0.07), # GO
-        #legend.position =  c(1.8,-0.08), # kegg
-        legend.direction = "horizontal",
-        legend.box = "vertical",
-        legend.spacing.x = unit(0.025, 'cm')
+  facet_grid(~ State, scales = "free", space = "free", switch = "y"),
+  scale_color_gradient(
+    low = pos_color_low,
+    high = pos_color_high,
+    limits = c(0, max_p_cv) # adjust limits
   ),
+  # scale_size_continuous(
+  #   limits = c(min_gr_cv, max_gr_cv) # adjust limits
+  # ),
+  
+  # 3. Labels & guides
+  ylab(NULL),
   labs(color = "-log10 (p.adjust)"),
-  guides(size = guide_legend(order = 2),
-         color = guide_colorbar(order = 1,
-                                title.theme =
-                                  element_text(
-                                    margin = margin(-15, 0, 0, 0, "pt"))
-                                )
-         )
+  guides(
+    size = guide_legend(order = 2, stroke = 0),
+    color = guide_colorbar(
+      order = 1,
+      title.theme = element_text(
+        margin = margin(-15, 0, 0, 0, "pt")
+      )
+    )
+  ),
+  
+  # 4. Theme adjustments
+  theme(
+    axis.title = element_blank(),
+    axis.text.x = element_text(angle = 90, hjust = 1, vjust = .5),
+    axis.ticks = element_blank(),
+    
+    strip.background = element_blank(),
+    strip.background.x = element_blank(),
+    strip.background.y = element_blank(),
+    strip.placement = "outside",
+    strip.text = element_text(face = "bold", size = 7),
+    
+    legend.text = element_text(size = 7),
+    legend.title = element_text(size = 7),
+    legend.title.position = "top",
+    legend.position = "inside",
+    legend.position.inside = c(2, -0.07), # GO
+    legend.direction = "horizontal",
+    legend.box = "vertical",
+    legend.spacing.x = unit(0.025, "cm"),
+    legend.key.spacing.x = unit(0.01, "cm"),
+    legend.background = element_blank(),
+    legend.box.background = element_blank(),
+    
+    panel.background = element_blank(),
+    plot.background = element_blank()
+  )
 )
+
 
 #add foldenrichment
 
@@ -522,7 +543,9 @@ df_down_cv_mn_rc <- df_down_cv_mn_rc %>%
 
 ```{r}
 dp_up_cv_mn_rc <- ggplot(df_up_cv_mn_rc, 
-                         aes(x = Cluster, y = reorder(ID_desc, p.adjust),
+                         aes(x = Cluster, 
+                             #y = reorder(ID_desc, p.adjust),
+                             y = Description,
                              size = FoldEnrichment, color = p.adjust)) +
   theme.dp_cv + scale_y_discrete(position = "right") + 
   #ggtitle(glue("crypt/villus {NAME} up row cluster")) +
@@ -530,7 +553,9 @@ dp_up_cv_mn_rc <- ggplot(df_up_cv_mn_rc,
   theme(legend.position =  c(1.85,-0.08)) # reactome
 
 dp_down_cv_mn_rc <- ggplot(df_down_cv_mn_rc,
-                           aes(x = Cluster, y = reorder(ID_desc, p.adjust), 
+                           aes(x = Cluster,
+                               y = Description,
+                               #y = reorder(ID_desc, p.adjust), 
                                size = FoldEnrichment, color = p.adjust)) +
   theme.dp_cv + scale_y_discrete(position = "right") +  
   scale_color_gradient(low = neg_color_low,
@@ -545,16 +570,16 @@ save_ggplot_formats(
   plt = dp_up_cv_mn_rc,
   create_plot_subdir = TRUE,
   base_plot_dir = plots_folder,
-  plt_name = glue("{NAME}_dotplot.up_cv_rc_FE_v2"),
-  width = 3.5,height = 7
+  plt_name = glue("{NAME}_dotplot.up_cv_rc_FE"),
+  width = 4.5,height = 4
   )
 
 save_ggplot_formats(
   plt = dp_down_cv_mn_rc,
   create_plot_subdir = TRUE,
   base_plot_dir = plots_folder,
-  plt_name = glue("{NAME}_dotplot.down_cv_rc_FE_v2"),
-  width = 3.5,height = 7
+  plt_name = glue("{NAME}_dotplot.down_cv_rc_FE"),
+  width = 3.5,height = 2.75
   )
 ```
 

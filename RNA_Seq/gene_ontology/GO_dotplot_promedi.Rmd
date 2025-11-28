@@ -23,7 +23,7 @@ library(GOSemSim)
 
 # Adjustments
 ```{r}
-harddrive  <- "H:"
+harddrive  <- "D:/231248/NTFS_3.64TB" 
 
 source(file.path(harddrive,"DE_analysis/helper_functions.R"))
 
@@ -56,7 +56,7 @@ ont <- "bp"
 p.cutoff <- 0.05
 
 # The number of GO terms to compare
-topN  <- 10
+topN  <- 4
 
 # Count cutoff. The low end filtering of counts
 count.cutoff <- 10
@@ -145,14 +145,14 @@ promedi_entrez <- lapply(res_promedi,function(upgene){
 
 # Calculate GO/Pathways and compare cluster
 ```{r}
-
-GO_upReg_results <- enrichGO(gene          = res_promedi$preWe.pro_filter,
-                             OrgDb         = "org.Mm.eg.db",
-                             keyType       = "SYMBOL",
-                             ont           = ont,
-                             pAdjustMethod = "BH",
-                             pvalueCutoff  = p.cutoff,
-                             readable      = TRUE)
+# 
+# GO_upReg_results <- enrichGO(gene          = res_promedi$preWe.pro_filter,
+#                              OrgDb         = "org.Mm.eg.db",
+#                              keyType       = "SYMBOL",
+#                              ont           = ont,
+#                              pAdjustMethod = "BH",
+#                              pvalueCutoff  = p.cutoff,
+#                              readable      = TRUE)
 
 if(comparison == "GO"| comparison == "all"){
   compare_promedi_GO <- compareCluster(res_promedi,
@@ -164,10 +164,10 @@ if(comparison == "GO"| comparison == "all"){
                              pvalueCutoff  = p.cutoff,
                              readable = TRUE
                              )
-  write.csv(as.data.frame(compare_promedi_GO),
-            file = file.path(charts_folder,
-                             "compare_promedi_GO.csv"),
-            row.names = FALSE)
+  # write.csv(as.data.frame(compare_promedi_GO),
+  #           file = file.path(charts_folder,
+  #                            "compare_promedi_GO.csv"),
+  #          row.names = FALSE)
   compare_promedi <- compare_promedi_GO
 }
 
@@ -314,53 +314,76 @@ generate_compare_promedi <- function(compare_GO,
   df_promedi$Description <- fct_relevel(df_promedi$Description,
                                         rev(clust$labels[clust$order]))
   
-  df_promedi$Description_trunc <- sapply(df_promedi$Description, truncate_go_term)
+  df_promedi$Description_trunc <- sapply(df_promedi$Description,
+                                         truncate_go_term)
   
   df_promedi$ID_desc <- paste(df_promedi$ID, df_promedi$Description_trunc)
   
   # Adjust p-value and calculate FoldEnrichment
   df_promedi <- df_promedi %>%
-    mutate(p.adjust = ifelse(p.adjust > max_p_promedi, max_p_promedi, p.adjust)) %>%
+    mutate(p.adjust = ifelse(p.adjust > max_p_promedi, 
+                             max_p_promedi, p.adjust)) %>%
     mutate(FoldEnrichment = (GeneRatio / parse_ratio(BgRatio)))
+
+    #Define theme
+theme.dp_promedi <- list(
+  # 1. Geoms
+  geom_point(stroke = 0),
   
-  # Define theme
-  theme.dp_promedi <- list(
-    theme_dose(5),
-    facet_grid(~ State, scales = "free", space = "free", switch = "y"),
-    ylab(NULL),
-    theme(axis.title = element_blank(),
-          axis.text.x = element_text(angle = 90,
-                                     hjust = 1,
-                                     vjust = .5),
-           axis.text.y = element_text(angle = 45),
-          #panel.spacing = unit(x = 0.1, units = "cm"),
-          strip.background = element_blank(),
-          strip.placement = "outside",
-          strip.text = element_text(face = "bold",size = 5),
-          legend.text = element_text(size = 5),
-          legend.title = element_text(size = 5),
-          legend.title.position ="top",
-          legend.position = "inside",
-          legend.position.inside =  c(1.4,0), 
-          legend.direction = "horizontal",
-          legend.box = "vertical",
-          legend.spacing.x = unit(0.025, 'cm'),
-          legend.spacing.y = unit(0.025,"cm"),
-          legend.key.spacing.x = unit(0, 'cm'),
-          legend.background = element_blank(),
-          panel.background = element_blank(), #transparent panel bg
-          plot.background = element_blank(), #transparent plot bg
-          #panel.border = element_blank(),
-          axis.ticks = element_blank(),
-    ),
-    guides(size = guide_legend(order = 2),
-           color = guide_colorbar(order = 1,
-                                  title.theme =
-                                    element_text(
-                                      margin = margin(-15, 0, 0, 0, "pt"))
-           )
+  # 2. Facets & scales
+  theme_dose(7),
+  facet_grid(~ State, scales = "free", space = "free", switch = "y"),
+  scale_color_gradient(
+    low = low_color,
+    high = high_color,
+    limits = c(0, max_p_promedi)  # Skalenlimit analog zu theme.dp_cv
+  ),
+  
+  # 3. Labels & guides
+  ylab(NULL),
+  labs(color = "-log10 (p.adjust)"),
+  guides(
+    size = guide_legend(order = 2, stroke = 0), # Ring in Legend entfernen
+    color = guide_colorbar(
+      order = 1,
+      title.theme = element_text(
+        margin = margin(-15, 0, 0, 0, "pt")
+      )
     )
+  ),
+  
+  # 4. Theme adjustments
+  theme(
+    axis.title = element_blank(),
+    axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5),
+    #axis.text.y = element_text(angle = 45),
+    axis.ticks = element_blank(),
+    
+    strip.background = element_blank(),
+    strip.background.x = element_blank(),
+    strip.background.y = element_blank(),
+    strip.placement = "outside",
+    strip.text = element_text(face = "bold", size = 5),
+    
+    legend.text = element_text(size = 5),
+    legend.title = element_text(size = 5),
+    legend.title.position = "top",
+    legend.position = "inside",
+    legend.position.inside = c(1.4, 0),
+    legend.direction = "horizontal",
+    legend.box = "vertical",
+    legend.spacing.x = unit(0.025, "cm"),
+    legend.spacing.y = unit(0.025, "cm"),
+    legend.key.spacing.x = unit(0, "cm"),
+    legend.background = element_blank(),
+    legend.box.background = element_blank(),
+    
+    panel.background = element_blank(), # transparent panel bg
+    plot.background = element_blank()   # transparent plot bg
   )
+)
+
+
   # Plot
   plot <- ggplot(df_promedi, aes(x = Cluster, 
                                  y = Description,
@@ -389,24 +412,28 @@ generate_compare_promedi <- function(compare_GO,
 
 ```
 
-
 ```{r}
+NAME="GO_promedi"
+NAME <- paste0(NAME,"_","top_",topN)
+
+
 generate_compare_promedi(up_compare_GO, 
                         count_cutoff = count.cutoff, 
                         topN = topN, 
                         low_color = pos_color_low, 
                         high_color = pos_color_high, 
                         save_plot = TRUE, 
-                        save_table = TRUE, 
+                        save_table = FALSE, 
                         plot_dir = plots_folder,
                         charts_dir = charts_folder, 
-                        plot_name = "promedi_up_compare_filter_GO", 
-                        table_name = "promedi_up_compare_filter_GO",
-                        plot_width = 3,
-                        plot_height = 6)
+                        plot_name = glue(NAME,"up_compare_filter"),
+                        table_name = glue(NAME,"up_compare_filter"),
+                        plot_width = 5,
+                        plot_height = 4)
 ```
 
 ```{r}
+
 generate_compare_promedi(down_compare_GO, 
                         count_cutoff = count.cutoff, 
                         topN = topN, 
@@ -416,9 +443,10 @@ generate_compare_promedi(down_compare_GO,
                         save_table = TRUE, 
                         plot_dir = plots_folder,
                         charts_dir = charts_folder, 
-                        plot_name = "promedi_down_compare_filter_GO", 
-                        table_name = "promedi_down_compare_filter_GO",
-                        plot_width = 2.75,
-                        plot_height = 6)
+                        plot_name = glue(NAME,"down_compare_filter"),
+                        table_name = glue(NAME,"_down_compare_filter"),
+                        plot_width = 3.5,
+                        plot_height = 3.5
+                        )
 ```
 
