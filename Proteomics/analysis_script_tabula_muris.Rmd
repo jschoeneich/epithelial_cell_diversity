@@ -1,0 +1,428 @@
+---
+title: "Scrna exploration script Tabula Muris FACS"
+author: "Johannes Schoeneich"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output:
+  html_document:
+    toc: yes
+    toc_depth: 3
+    toc_float:
+      collapsed: false
+      smooth_scroll: false
+  pdf_document:
+    toc: yes
+    toc_depth: '3'
+---
+
+```{r echo = FALSE, message = FALSE, warning = FALSE}
+# The R-packages Seurat and ggplot2 are required for this script
+library(ggplot2, quietly = TRUE)
+library(Seurat, quietly = TRUE)
+
+loadRData <- function(fileName){
+  #loads an RData file, and returns it
+  load(fileName)
+  get(ls()[ls() != "fileName"])
+}
+
+```
+
+# User input
+
+```{r}
+# Press ctrl + shift + enter to run whole chunks 
+# (or the little green arrow on the right)
+# On the top Knit --> Knit to html/pdf, to save the whole script as a 
+# html file to view in the browser
+# or as pdf (might take a few minutes)
+
+harddrive <- "H:"
+
+# Write the path of the R object here
+PATH <- file.path(harddrive,"prot_vs_rna/tabula muris/tabula_muris_facs_updated.Rds")
+
+plots_folder <- file.path(harddrive,"prot_vs_rna/tabula muris")
+
+# Change the genename here for all plots (or change the genes individually per plot).
+# Either one name or multiple genes in a vector. Case sensitivity matters!
+#genename <- c("Cd44","Mafb","Mamdc4","Aspn")
+
+# Alternative: read in a list of genes (each gene in a new line)
+genelistPATH <- file.path(harddrive,"prot_vs_rna/prot_not_cm.txt")
+genename <- scan(genelistPATH,what = "character")
+
+# Choose the cluster names (names according to scrna@meta.data)
+cluster <- "free_annotation"
+cluster <- "cell_ontology_class"
+```
+
+#User input: Advanced features
+
+```{r, echo = FALSE, cache.lazy = FALSE}
+
+source(file.path(harddrive,"helper_functions.R"))
+source(file.path(harddrive,"scrna_datasets/save_load_helper.R"))
+
+source(file.path(harddrive,"scrna_datasets/single_cell_themes.R"))
+#Read in the dataset and do some basic data transformations and adjustments
+
+# scrna <- loadRData(PATH)
+# scrna <- UpdateSeuratObject(object = scrna)
+
+scrna <- load_object(PATH)
+
+Idents(scrna) <- cluster
+
+genename <- genename[genename %in% rownames(scrna@assays$RNA)]
+
+#sometimes rowsums are 0 and cause problems
+sums <- rowSums(scrna@assays$RNA@data[genename,])
+genename <- genename[which(sums!=0)]
+
+#write.table(genename,file = "genes_from_input_used_facs.txt",row.names = FALSE,quote = FALSE,col.names = F) 
+```
+
+```{r}
+#to generate the same annotation as on the tabula muris homepage we need to merge free annotation with cell ontology class
+
+cell_types_to_update <- c("basal cell", "stromal cell", "endothelial cell")
+
+scrna$free_annotation_merged <- scrna$free_annotation
+
+scrna@meta.data$free_annotation_merged[
+  scrna@meta.data$cell_ontology_class %in% 
+    cell_types_to_update] <- scrna@meta.data$cell_ontology_class[
+      scrna@meta.data$cell_ontology_class %in% cell_types_to_update]
+
+
+```
+
+# UMAP with clusters
+
+```{r, echo = FALSE, out.width = "400%", fig.width = 7, fig.height = 6}
+tsne_plot <- DimPlot(scrna, 
+        reduction = "tsne", 
+        group.by = "free_annotation_merged",
+        label = TRUE, 
+        label.size = 2,
+        raster = TRUE) + 
+  mini_tsne_theme + ggtitle(element_blank())
+```
+
+# Violin plot
+
+```{r fig.height = 16, fig.width = 24, echo = FALSE, message = FALSE, warning = FALSE}
+#split by stage (order is day1,day5,day10,day25)
+#VlnPlot(object = scrna, features = genename, split.by = 'stage', pt.size = 0)
+
+#split by clusters
+for (i in seq(1, length(genename), by = 4)){
+      ni = min(i + 3, length(genename))
+      print(VlnPlot(object = scrna, features = genename[i:ni], 
+                    split.by = cluster, pt.size = 0))
+      }
+```
+
+# Gene expression in UMAP
+
+```{r fig.height = 8, fig.width = 8, echo = FALSE}
+for (i in seq(1, length(genename), by = 4)){
+      ni = min(i + 3, length(genename))
+      print(FeaturePlot(
+        object = scrna,
+        pt.size = 0.01,
+        label = TRUE,
+        label.size = 3,
+        features = genename[i:ni],
+        reduction = "tsne",
+        order = TRUE,
+        cols = c("lightgrey", "red"),
+        ncol = 2,
+        max.cutoff = "q95"
+      ))
+}
+```
+
+# Gene expression Dotplot
+
+```{r, echo = FALSE, fig.height = 16, fig.width = 24, eval = FALSE}
+if(length(genename) > 1){
+DotPlot(
+      object = scrna,
+      features = c("Actb","Muc1"),#genename,
+      #group.by = cluster,
+      cols = c("darkgrey", "red")
+    ) + theme(axis.text.x = element_text(angle = 45, hjust = 1))
+}
+```
+
+# Aggregated expression of multiple genes
+
+```{r, echo = FALSE}
+
+plot_aggregate_expression <- function(object,gene_names,meta_name = "aggr_exp"){
+  # Are all gene names in the Seurat object?
+  # Use only those which are, otherwise there is an error!
+  gene_query <- gene_names %in% rownames(object@assays$RNA)
+  if(sum(gene_query)> 0){
+    gene_names <- gene_names[gene_query]
+    if(length(gene_names) <5){
+    meta_name <- paste(c(meta_name,gene_names), collapse = ".")
+    }
+    #Get the Aggregate expression
+    object <- MetaFeature(
+      object = object,
+      features = gene_names,
+      meta.name = meta_name
+    )
+    
+    FeaturePlot(object,
+                features = meta_name,
+                reduction = "tsne", 
+                label.size = 2,
+                max.cutoff ="q95",
+                min.cutoff = "q80", 
+                label = TRUE, 
+                order = TRUE, 
+                repel = TRUE,
+                cols = c("lightgrey", "red"),
+                raster = TRUE) + 
+      mini_tsne_theme +
+      ggtitle(element_blank())
+  } #error capture
+  else {return(capture.output(cat("Error! Could not find any of the following genes",
+                                  gene_names)))
+  }
+}
+
+agg_exp_plot <- plot_aggregate_expression(scrna,genename,
+                          meta_name = "aggregated_expression_of_prot_not_in_cm")
+
+lapply(seq_along(agg_exp_plot),
+       function(i){
+         save_ggplot_formats(
+           plt = agg_exp_plot[[i]],
+           base_plot_dir = plots_folder,
+           plt_name = "aggregated_expression_tabula_muris_v4",
+           width = 2.5, height = 2.5)
+       }
+)
+```
+
+```{r}
+meta_name = "aggr_exp"
+  gene_query <- genename %in% rownames(scrna@assays$RNA)
+  if(sum(gene_query)> 0){
+    gene_names <- genename[gene_query]
+    if(length(gene_names) <5){
+    meta_name <- paste(c(meta_name,genename), collapse = ".")
+    }
+  }
+    #Get the Aggregate expression
+    scrna <- MetaFeature(
+      object = scrna,
+      features = gene_names,
+      meta.name = meta_name
+    )
+    
+bulk <- Seurat:::PseudobulkExpression(object = scrna,
+                                      pb.method = 'aggregate',
+                                      slot = 'counts')
+
+VlnPlot(object = scrna, features = genename,
+        split.by = 'free_annotation_merged', pt.size = 0)
+
+
+#scrna$aggr_exp <- scrna$aggr_exp*1000
+
+feature_list <- list(genename)
+
+scrna <- AddModuleScore(object = scrna, features = feature_list, name = "prot_not_cm")
+```
+
+```{r}
+Idents(scrna) <- "free_annotation_merged"
+
+vln <- VlnPlot(scrna, features = "prot_not_cm1",pt.size = 0, 
+               group.by = "free_annotation_merged",sort = TRUE) +
+  ggtitle("average expr. of the proteins not found in countmatrix") + 
+  theme(axis.title.x = element_blank()) + NoLegend()
+
+fp_avg_exp <- FeaturePlot(scrna, 
+                  features = "prot_not_cm1",
+                  reduction = "tsne",
+                  max.cutoff = "q95",
+                  min.cutoff = "q80",
+                  label = TRUE, 
+                  order = TRUE,
+                  raster = TRUE,
+                  label.size = 2,
+                  cols = c("lightgrey", "red")) + 
+  ggtitle("average expr. of the proteins not found in countmatrix") + 
+  fp_theme
+
+fp_agg_exp <- FeaturePlot(scrna, 
+                   features = "aggr_exp",
+                   reduction = "tsne",
+                   max.cutoff = "q95",
+                   min.cutoff = "q80", 
+                   #label = TRUE,
+                   label = FALSE,
+                   order = TRUE,
+                   #raster = TRUE,
+                   #pt.size	= 8,
+                   #raster.dpi = c(750,750),
+                   label.size = 2,
+            cols = c("lightgrey", "red")) +
+  #ggtitle("aggr expr. of the proteins not found in countmatrix") +
+  ggtitle(element_blank()) +
+  fp_theme
+
+save_ggplot_formats(
+  plt = vln,
+  create_plot_subdir = TRUE,
+  base_plot_dir = plots_folder,
+  plt_name = "vln_aggr_exp_tabula_muris_v4",
+  width = 6,height = 4
+)
+
+save_ggplot_formats(
+  plt = fp_avg_exp,
+  create_plot_subdir = TRUE,
+  base_plot_dir = plots_folder,
+  plt_name = "fp_avg_exp_tabula_muris_v4",
+  width = 3,height = 3
+)
+
+save_ggplot_formats(
+  plt = fp_agg_exp,
+  create_plot_subdir = TRUE,
+  base_plot_dir = plots_folder,
+  plt_name = "fp_agg_exp_tabula_muris_v6",
+  width = 3,height = 3
+)
+```
+
+# Gene Co-Expression
+
+```{r fig.height=6, fig.width=20, echo=FALSE,eval=FALSE}
+FeaturePlot(scrna,reduction = "tsne", features = co_expression, order = TRUE, 
+            max.cutoff = 'q95', blend = TRUE)
+```
+
+```{r}
+#aggregrate expression stuff, add to the right place
+FeaturePlot(scrna,features = "N6amt2",reduction = "tsne",
+            max.cutoff = "q95", label = TRUE, order = TRUE, repel = TRUE,
+            cols = c("lightgrey", "red")) + ggtitle(element_blank()) + 
+  guides(x = axis, y = axis) + 
+  labs(x = "t-SNE1",y = "t-SNE2") +
+  theme(axis.title = element_text(hjust = 0), 
+        #legend.text = element_text(size = 15), 
+        axis.ticks = element_blank(),axis.text = element_blank(),
+        axis.line = element_line(arrow = arrow(),linewidth = 1))
+```
+
+# Heatmap of tabula muris genes
+```{r}
+#mat <- GetAssayData(scrna, slot = "scale.data")[genename, ]
+
+# 2. Average expression per cluster
+Idents(scrna) <- "free_annotation_merged"
+avg_exp <- AverageExpression(
+  scrna,
+  features = genename,
+  group.by = "free_annotation_merged"
+)$RNA
+
+# 3. Prepare the expression matrix
+mat <- as.matrix(avg_exp[genename, ])
+
+# 4. Scale across clusters (z-score each gene)
+mat_scaled <- t(scale(t(mat)))  # rows = genes, columns = clusters
+
+
+# Define color scale
+col_fun <- colorRamp2(c(-2, 0, 2), c("navy", "white", "firebrick3"))
+
+# Plot
+hm_tabula <- Heatmap(
+  mat_scaled,
+  name = "Expression (z-score)",
+  cluster_rows = TRUE,
+  cluster_columns = TRUE,
+  show_row_names = TRUE,
+  show_column_names = TRUE,
+  col = col_fun,
+  row_names_gp = gpar(fontsize = 7),
+  column_names_gp = gpar(fontsize = 7),
+  use_raster = TRUE,
+  raster_quality = 2
+)
+```
+
+
+```{r}
+save_ggplot_formats(
+  plt = hm_tabula,
+  plot_obj = "hm",
+  base_plot_dir = plots_folder,
+  plt_name = "hm_avg_exp_tabula_muris_small_hc",
+  width = 4,height = 4
+)
+
+```
+
+```{r}
+
+score_col <- "prot_not_cm1" 
+# Compute average per cluster
+avg_score <- scrna@meta.data %>%
+  dplyr::group_by(free_annotation_merged) %>%
+  dplyr::summarise(mean_score = mean(.data[[score_col]], na.rm = TRUE)) %>%
+  as.data.frame()
+
+# Convert to matrix: one row (the module score), one column per cluster
+mat <- t(as.matrix(avg_score$mean_score))
+colnames(mat) <- avg_score$free_annotation_merged
+rownames(mat) <- "Module score"
+
+
+# Simple one-row heatmap
+avg_mod_score_hm <- Heatmap(
+  mat,
+  name = "Avg.Mod.Score",
+  col = colorRamp2(c(min(mat), 0, max(mat)), c("navy", "white", "firebrick3")),
+  cluster_rows = FALSE,
+  cluster_columns = TRUE,
+  show_row_names = FALSE,
+  column_names_rot = 55
+)
+
+save_ggplot_formats(
+  plt = avg_mod_score_hm,
+  plot_obj = "hm",
+  base_plot_dir = plots_folder,
+  plt_name = "hm_avg_exp_tabula_muris_mod_score",
+  width = 3,height = 3
+)
+
+```
+
+```{r}
+prot_df <- read.csv(file.path(harddrive,
+                              "Proteomics/raw_data_protdf.csv"),
+                              header = TRUE,
+                              row.names = 1)
+
+write.xlsx(prot_df[genename,], 
+           file.path(harddrive,
+           "prot_vs_rna/tabula muris/proteins_not_in_cm_tbl.xlsx"),
+           rowNames = TRUE)
+
+write.xlsx(mat_scaled, 
+           file.path(harddrive,
+           "prot_vs_rna/tabula muris/proteins_tabula_muris_scaled.xlsx"),
+           rowNames = TRUE)
+```
+
