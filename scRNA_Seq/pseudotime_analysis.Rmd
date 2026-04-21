@@ -1,0 +1,1303 @@
+---
+title: "Pseudotime Analysis with Slingshot"
+author: "Johannes Schöneich"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    number_sections: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+
+# Load Required Libraries
+```{r libraries}
+#library(monocle3)
+library(Seurat)
+library(stringr)
+library(SeuratWrappers)
+library(RColorBrewer)
+library(scCustomize)
+library(tidyverse)
+library(SeuratExtend)
+library(tidyverse)
+library(glue)
+library(ComplexHeatmap)
+library(circlize)
+library(openxlsx)
+```
+
+# Define Paths and Load Helpers
+```{r paths}
+# Set working directories
+harddrive <- "H:/231248/NTFS_3.64TB"
+#harddrive <- "/media/johannes/EXTERNAL_USB/231248/NTFS_3.64TB"
+
+source(file.path(harddrive,"helper_functions.R"))
+source(file.path(harddrive,"scrna_datasets/save_load_helper.R"))
+source(file.path(harddrive,"scrna_datasets/single_cell_themes.R"))
+
+analysis_folder <- file.path(
+  harddrive,
+  "scrna_datasets/scrna_full_both_d25_mito_filter_inf",
+  "scrna_full_both_d25_mito100_inf"
+)
+
+plots_folder <- file.path(harddrive,"pseudotime/noc2_no11/plots")
+dir.create(plots_folder)
+
+charts_folder <- file.path(harddrive,
+                           "dorothea_2025/all_stages/analysis/charts")
+```
+
+# Load Seurat Object
+```{r load-seurat}
+# Example object
+scrna <- load_object(
+  file.path(analysis_folder,"scrna_full_filtered_uninf.Rds"))
+
+# Define color palettes
+TA_col <- Hue_Pal(5)
+TA_col <- append(TA_col,"#F17D50", after = 5)
+
+Idents(scrna) <- "int_0.3_broad_TA"
+
+
+# Define the folder path for Enterocyte datasets
+ent_folder <- file.path(
+  harddrive,
+  "subsets/subsets_2025/save/noc2_no11/ent"  
+)
+
+#enterocyte reclustered
+ent_reclust <- load_object(file.path(
+  ent_folder, 
+  "scrna_ent_uninf.Rds" 
+))
+
+# Define the folder path for Enterocyte datasets
+gob_folder <- file.path(
+  harddrive,
+  "subsets/subsets_2025/save/noc2/gob/"  
+)
+
+#enterocyte reclustered
+scrna_goblet <- load_object(file.path(
+  gob_folder, 
+  "scrna_gob_uninf.Rds" 
+))
+
+tf_csv <- read.csv(file.path(charts_folder, "acts_decoupler_scrna_size5.csv"))
+```
+
+# slingshot pseudotime 
+```{r}
+plots_folder <- file.path(harddrive,"pseudotime/noc2_no11/plots/",
+                          "slingshot_agewise/v3")
+dir.create(plots_folder)
+
+# Example subsets by stage
+timepoints <- c("d01", "d05", "d10", "d25")
+groupings <- list(
+  "d05_d10"   = c("d05", "d10"),
+  "preweaning" = c("d01", "d05", "d10")
+)
+
+#we need to do this for full scrna and ent_reclust
+
+Idents(ent_reclust) <- "stage"
+ent_reclust$stage <- droplevels(ent_reclust$stage)
+
+cluster_use <- "integrated_snn_res.0.4"
+
+### Run Slingshot per timepoint
+sling_gob_time_list <- lapply(timepoints, function(tp) {
+  print(glue("Processing timepoint: {tp}"))
+
+  subset_obj <- subset(ent_reclust, idents = tp)
+  
+  tab <- table(subset_obj[[cluster_use]])
+  small_clusters <- names(tab[tab < 20])
+  
+  Idents(subset_obj) <- cluster_use
+  removed_cells <- WhichCells(subset_obj, idents = small_clusters)
+
+  # subset to keep everything but the tiny clusters
+   if(!is.null(removed_cells)){
+  subset_filt <- subset(subset_obj, cells = removed_cells, invert = TRUE)
+  subset_filt[[cluster_use]] <- droplevels(subset_filt[[cluster_use]])
+   } else {subset_filt <- subset_obj}
+  
+  subset_filt <- RunSlingshot(
+    subset_filt,
+    group.by   = "integrated_snn_res.0.4",
+    start.clus = "4",
+    reducedDim = "INTE_PCA"
+  )
+
+  sling <- subset_filt@misc$slingshot$INTE_PCA$SlingPseudotime
+  colnames(sling) <- paste0(colnames(sling), "_PCA")
+  subset_filt@meta.data[, colnames(sling)] <- as.data.frame(sling)
+
+  dp_subset_obj <- DimPlot2(
+    subset_filt,
+    features   = colnames(sling),
+    cols       = "C",
+    theme      = NoAxes(),
+    reduction  = "INTE_UMAP"
+  )
+  
+  ncols <- ncol(sling)
+
+  # Start at minimum width of 5
+  plt_width <- 5
+  
+  # If more than 4 columns, increase by 1 for every 2 columns over 4
+  if (ncols > 4) {
+    plt_width <- 5 + floor((ncols - 5) / 2) + 1
+  }
+
+  # optionally fix height for small numbers of columns
+  plt_height <- ifelse(ncols < 3, 2, 4)
+  
+  save_ggplot_formats(
+    plt           = dp_subset_obj,
+    base_plot_dir = plots_folder,
+    plt_name      = glue("slingshot_ent_reclust_{tp}"),
+    width         = plt_width,
+    height        = plt_height
+  )
+
+  list(sling = sling, seurat = subset_filt)
+})
+names(sling_gob_time_list) <- timepoints
+
+
+### Run Slingshot per group of timepoints
+sling_group_list <- lapply(names(groupings), function(grp) {
+  print(glue("Processing group: {grp}"))
+
+  tp_list <- groupings[[grp]]
+  subset_obj <- subset(ent_reclust, idents = tp_list)
+  
+  tab <- table(subset_obj[[cluster_use]])
+  small_clusters <- names(tab[tab < 20])
+  
+  Idents(subset_obj) <- cluster_use
+  removed_cells <- WhichCells(subset_obj, idents = small_clusters)
+
+  # subset to keep everything but the tiny clusters
+ if(!is.null(removed_cells)){
+  subset_filt <- subset(subset_obj, cells = removed_cells, invert = TRUE)
+  subset_filt[[cluster_use]] <- droplevels(subset_filt[[cluster_use]])
+ } else {subset_filt <- subset_obj}
+  
+  subset_filt <- RunSlingshot(
+    subset_filt,
+    group.by   = "integrated_snn_res.0.4",
+    start.clus = "4",
+    reducedDim = "INTE_PCA"
+  )
+
+  sling <- subset_filt@misc$slingshot$INTE_PCA$SlingPseudotime
+  colnames(sling) <- paste0(colnames(sling), "_PCA")
+  subset_filt@meta.data[, colnames(sling)] <- as.data.frame(sling)
+
+  dp_subset_obj <- DimPlot2(
+    subset_obj,
+    features   = colnames(sling),
+    cols       = "C",
+    theme      = NoAxes(),
+    reduction  = "INTE_UMAP"
+  )
+
+  ncols <- ncol(sling)
+
+  # Start at minimum width of 5
+  plt_width <- 5
+  
+  # If more than 4 columns, increase by 1 for every 2 columns over 4
+  if (ncols > 4) {
+    plt_width <- 5 + floor((ncols - 5) / 2) + 1
+  }
+
+  # optionally fix height for small numbers of columns
+  plt_height <- ifelse(ncols < 3, 2, 4)
+  
+  save_ggplot_formats(
+    plt           = dp_subset_obj,
+    base_plot_dir = plots_folder,
+    plt_name      = glue("slingshot_ent_reclust_{grp}"),
+    width         = plt_width,
+    height        = plt_height
+  )
+  list(sling = sling, seurat = subset_filt)
+})
+names(sling_group_list) <- names(groupings)
+
+
+### both results together
+sling_results <- c(
+  sling_gob_time_list,
+  sling_group_list
+)
+
+#sling_results
+
+
+```
+
+```{r}
+sling_results <- load_object(file.path(harddrive,
+                      "pseudotime/noc2_no11/saves/slingshot_all_ages2025.Rds")
+                      )
+```
+
+#TFs and promedi in pseudotime
+
+```{r}
+multi_pseudotime_analysis <- function(scrna,
+                                      pseudotime_cols = 
+                                        c("pt1", "pt2", "pt3", "pt4"),
+                                      module_cols =
+                                        c("aggr.exp_promedi_poWe.dis_filter1",
+                                          "aggr.exp_promedi_poWe.pro_filter1",
+                                          "aggr.exp_promedi_preWe.dis_filter1",
+                                          "aggr.exp_promedi_preWe.pro_filter1",
+                                          "aggr.exp_cv_crypt_filter1",
+                                          "aggr.exp_cv_villus_filter1"),
+                                      n_bins = 10) {
+  # 0) Extract data
+  df <- FetchData(scrna, vars = c(pseudotime_cols, module_cols))
+  
+  # We standardize each module across all cells:
+  # This puts every module on the same scale so we can compare
+  # their dynamics along pseudotime, without being biased by differences
+  # in overall expression or number of genes in the module.
+  # After this, 0 means "average activity", positive = above average,
+  # negative = below average.
+
+  df[module_cols] <- scale(df[module_cols])
+  
+  # 1) Scale all pseudotimes to 0–1
+  for (pt in pseudotime_cols) {
+    df[[paste0(pt, "_scaled")]] <- (df[[pt]] - min(df[[pt]], na.rm = TRUE)) /
+                                   (max(df[[pt]], na.rm = TRUE) - min(df[[pt]], na.rm = TRUE))
+  }
+  scaled_cols <- paste0(pseudotime_cols, "_scaled")
+  
+  # 2) Correlation table (now correlations on z-scored modules)
+  cor_table <- expand.grid(pt = pseudotime_cols, module = module_cols) %>%
+    rowwise() %>%
+    mutate(correlation = cor(df[[pt]], df[[module]], 
+                             method = "spearman", 
+                             use = "pairwise.complete.obs")) %>%
+    ungroup()
+  
+  # 3) Clean labels
+  clean_label <- function(x) {
+    lbl <- str_extract(x, "(?<=aggr\\.exp_(promedi|cv)_).*(?=_filter1)")
+    ifelse(is.na(lbl), x, lbl)
+  }
+  cor_table$module_clean <- clean_label(cor_table$module)
+  pt_labels <- setNames(scaled_cols, scaled_cols)
+  cor_table$pt_clean <- dplyr::recode(cor_table$pt, !!!pt_labels)
+  
+  # 4) Prepare binned averaged z-scored data
+  # # Once cells are assigned to pseudotime bins, we take the average
+  # z-score in each bin for each module. This gives the "mean z-score"
+  all_summaries <- list()
+  for (pt_scaled in scaled_cols) {
+    df$bin <- cut(df[[pt_scaled]], breaks = n_bins, labels = FALSE)
+    df_summary <- df %>%
+      filter(!is.na(bin)) %>%
+      group_by(bin) %>%
+      summarise(across(all_of(module_cols), mean, .names = "mean_{col}"),
+                n = n(), .groups = "drop")
+    df_summary$pt <- pt_scaled
+    all_summaries[[pt_scaled]] <- df_summary
+  }
+  
+  df_long <- bind_rows(all_summaries) %>%
+    tidyr::pivot_longer(cols = starts_with("mean_"),
+                        names_to = "module", values_to = "mean_score") %>%
+    mutate(module = gsub("^mean_", "", module),
+           module_clean = clean_label(module),
+           pt_clean = pt)
+  
+  # 5) Dotplot (still works; colors now show mean z-scores)
+  dotplot <- ggplot(df_long, aes(x = bin, y = module_clean,
+                                 size = n, color = mean_score)) +
+    geom_point() +
+    scale_color_viridis_c(option = "A") +
+    facet_wrap(~pt_clean, ncol = length(scaled_cols)) +
+    labs(title = "Z-scored module dynamics along scaled pseudotime",
+         x = "Scaled pseudotime (binned)", y = "Module (z-scored)") +
+    theme_classic() +
+    theme(strip.text = element_text(size = 9))
+  
+  # 6) Global color scale: symmetric around 0 (z-scores)
+  col_fun <- circlize::colorRamp2(c(-2, 0, 2),
+                                  c("navy", "white", "firebrick"))
+  
+  # 7) Heatmaps (z-score based)
+  heatmaps <- list()
+  for (pt_scaled in scaled_cols) {
+    df_sub <- df_long %>% filter(pt == pt_scaled)
+    mat <- df_sub %>%
+      dplyr::select(bin, module_clean, mean_score) %>%
+      tidyr::pivot_wider(names_from = module_clean, 
+                         values_from = mean_score) %>%
+      dplyr::arrange(bin) %>%
+      dplyr::filter(!is.na(bin))
+    
+    mat_mat <- as.matrix(mat %>% dplyr::select(-bin))
+    rownames(mat_mat) <- paste0("Bin_", mat$bin)
+    
+    hm <- Heatmap(mat_mat,
+                  name = "Mean z-score",
+                  col = col_fun,
+                  cluster_rows = FALSE,
+                  cluster_columns = FALSE,
+                  row_title_gp = gpar(fontsize = 7),
+                  column_title_gp = gpar(fontsize = 7),
+                  column_names_gp = gpar(fontsize = 7),
+                  row_names_gp = gpar(fontsize = 7),
+                  column_title = pt_scaled,
+                  row_title = "Pseudotime bins",
+                  heatmap_legend_param = list(title = "Mean z-score",
+                                              title_gp = gpar(fontsize = 7),
+                                              labels_gp = gpar(fontsize = 7)))
+    heatmaps[[pt_scaled]] <- hm
+  }
+  
+  return(list(cor_table = cor_table,
+              dotplot = dotplot,
+              heatmaps = heatmaps))
+}
+
+```
+
+```{r}
+res_promedi <- multi_pseudotime_analysis(scrna,
+                                 pseudotime_cols =
+                                   colnames(sling_ent_reclust),
+                                 module_cols =
+                                   c("aggr.exp_promedi_poWe.dis_filter1",
+                                     "aggr.exp_promedi_poWe.pro_filter1",
+                                     "aggr.exp_promedi_preWe.dis_filter1",
+                                     "aggr.exp_promedi_preWe.pro_filter1"
+                                                 ))
+
+
+# Correlations
+res_promedi$cor_table
+
+# Dotplot
+res_promedi$dotplot
+
+promedi_hm <- draw(res_promedi$heatmaps$slingPseudotime_1_PCA +
+                     res_promedi$heatmaps$slingPseudotime_2_PCA +
+                     res_promedi$heatmaps$slingPseudotime_3_PCA +
+                     res_promedi$heatmaps$slingPseudotime_4_PCA,
+     merge_legends = TRUE)
+```
+
+```{r}
+  save_ggplot_formats(plt = res_promedi$dotplot, 
+                      base_plot_dir = plots_dir, 
+                      create_plot_subdir = TRUE,
+                      plt_name = "promedi_dotplot_pseudotime", 
+                      width = 6, 
+                      height = 3)
+
+  save_ggplot_formats(plt = promedi_hm, 
+                      base_plot_dir = plots_dir, 
+                      create_plot_subdir = TRUE,
+                      plot_obj = "heatmap",
+                      plt_name = "promedi_heatmap_pseudotime", 
+                      width = 6, 
+                      height = 4)
+```
+
+```{r}
+res_cv <- multi_pseudotime_analysis(scrna,
+                                 pseudotime_cols =
+                                   colnames(sling_ent_reclust),
+                                 module_cols = c("all_crypts1",
+                                                 "all_villi1",
+                                                 "aggr.exp_cv_preWe.crypts1",
+                                                 "aggr.exp_cv_preWe.villi1",
+                                                 "aggr.exp_cv_poWe.crypts1",
+                                                 "aggr.exp_cv_poWe.villi1"  
+                                                 ))
+
+# Correlations
+res_cv$cor_table
+
+# Dotplot
+res_cv$dotplot
+
+cv_hm <- draw(res_cv$heatmaps$slingPseudotime_1_PCA +
+                res_cv$heatmaps$slingPseudotime_2_PCA +
+                res_cv$heatmaps$slingPseudotime_3_PCA + 
+                res_cv$heatmaps$slingPseudotime_4_PCA,
+              merge_legends = TRUE)
+```
+
+```{r}
+  save_ggplot_formats(plt = res_cv$dotplot, 
+                      base_plot_dir = plots_dir, 
+                      create_plot_subdir = TRUE,
+                      plt_name = "crypt_villus_dotplot_pseudotime", 
+                      width = 6, 
+                      height = 3)
+
+  save_ggplot_formats(plt = cv_hm, 
+                      base_plot_dir = plots_dir, 
+                      create_plot_subdir = TRUE,
+                      plot_obj = "heatmap",
+                      plt_name = "crypt_villus_heatmap_pseudotime", 
+                      width = 6, 
+                      height = 4)
+```
+
+```{r}
+res_moor <- multi_pseudotime_analysis(scrna,
+                                 pseudotime_cols = 
+                                   colnames(sling_ent_reclust),
+                                 module_cols = names(marker_genes)) #moor markers
+
+# Correlations
+res_moor$cor_table
+
+# Dotplot
+res_moor$dotplot
+
+moor_hm <- draw(res_moor$heatmaps$slingPseudotime_1_PCA +
+                  res_moor$heatmaps$slingPseudotime_2_PCA +
+                  res_moor$heatmaps$slingPseudotime_3_PCA + 
+                  res_moor$heatmaps$slingPseudotime_4_PCA,
+                merge_legends = TRUE)
+```
+
+```{r}
+  save_ggplot_formats(plt = res_moor$dotplot, 
+                      base_plot_dir = plots_dir, 
+                      create_plot_subdir = TRUE,
+                      plt_name = "moor_dotplot_pseudotime", 
+                      width = 6, 
+                      height = 3)
+
+  save_ggplot_formats(plt = moor_hm, 
+                      base_plot_dir = plots_dir, 
+                      create_plot_subdir = TRUE,
+                      plot_obj = "heatmap",
+                      plt_name = "moor_heatmap_pseudotime", 
+                      width = 6, 
+                      height = 4)
+```
+
+#transcription factors in pseudotime
+```{r}
+#this needs the pseudotime calculation and dorothea tf_acvitiy scores calculated (see dorothea_2025/dorothea_v2025 - the scripts need to be adjusted)
+#
+# we only do this on the enterocyte_reclustering data
+# Define the folder path for Enterocyte datasets
+ent_folder <- file.path(
+  harddrive,
+  "subsets/subsets_2025/save/noc2_no11/ent"  
+)
+
+#enterocyte reclustered
+scrna <- load_object(file.path(
+  ent_folder, 
+  "scrna_ent_inf_pseudotime.Rds" 
+))
+```
+
+```{r}
+calc_ht_size <- function(ht, unit = "in") {
+  pdf(NULL)
+  ht = draw(ht)
+  w = ComplexHeatmap:::width(ht)
+  w = grid::convertX(w, unit, valueOnly = TRUE)
+  h = ComplexHeatmap:::height(ht)
+  h = grid::convertY(h, unit, valueOnly = TRUE)
+  dev.off()
+  c(w, h)
+}
+
+
+```
+
+```{r}
+plots_folder <- file.path(harddrive,"pseudotime/noc2_no11/plots/hm2")
+dir.create(plots_folder)
+
+res_topN <- plot_top_tf_heatmaps(
+  seuratobject = scrna,
+  tf_csv = file.path(charts_folder, "acts_decoupler_scrna_size5.csv"),
+  pseudotime_cols = colnames(sling_ent_reclust),
+  #plots_folder = ,
+  n_segments = 10,
+  scale_pseudotime = TRUE,
+  top_n = 20
+)
+```
+
+```{r}
+plot_top_tf_heatmaps <- function(
+    seuratobject,
+    tf_input,                     # either path to CSV or a dataframe
+    pseudotime_cols,
+    out_dir,
+    n_bins = 10,
+    top_n = 20,
+    scale_pseudotime = TRUE,
+    subset_condition_pattern = NULL,
+    plt_name = ""
+) {
+
+  save_formats = c("png", "pdf")
+
+  # --- Load or accept TF activity input
+  if (is.character(tf_input)) {
+    message("Reading TF activity table from file...")
+    tf_activities <- read.csv(tf_input, header = TRUE)
+  } else if (is.data.frame(tf_input)) {
+    message("Using provided TF activity data frame...")
+    tf_activities <- tf_input
+  } else {
+    stop("`tf_input` must be either a path to a CSV file or a data frame.")
+  }
+  
+  # --- Optional filtering by pattern (e.g. "d01" or "preweaning")
+  if (!is.null(subset_condition_pattern)) {
+    tf_activities <- tf_activities %>%
+      filter(str_detect(condition, subset_condition_pattern))
+    message(glue("Filtered TF data by pattern:",
+                 "'{subset_condition_pattern}' 
+                 : {nrow(tf_activities)} rows remain"))
+  }
+  
+  # --- Reshape TF activities
+  tf_matrix <- tf_activities %>%
+    select(source, condition, score) %>%
+    pivot_wider(names_from = source, values_from = score) %>%
+    column_to_rownames("condition")
+  
+  # --- Keep only cells present in Seurat object
+  common_cells <- intersect(rownames(seuratobject@meta.data),
+                            rownames(tf_matrix))
+  if (length(common_cells) == 0) {
+    stop("No overlapping cell names found")
+  }
+  
+  tf_matrix <- tf_matrix[common_cells, , drop = FALSE]
+  
+  # --- Scale TF activities (z-score per TF)
+  tf_matrix <- scale(tf_matrix)
+  
+  # --- Iterate over pseudotime columns
+  for (pt_col in pseudotime_cols) {
+    message(glue("Processing {pt_col} ..."))
+    
+    pt <- FetchData(seuratobject, pt_col)[common_cells, , drop = FALSE]
+    colnames(pt) <- "pseudotime"
+    
+    df <- data.frame(pt, tf_matrix)
+    df <- df[!is.na(df$pseudotime), ]
+    
+    if (nrow(df) == 0) {
+      warning(glue("No valid pseudotime values for {pt_col}, skipping."))
+      next
+    }
+    
+    # --- Optionally rescale pseudotime
+    if (scale_pseudotime) {
+      df$pseudotime <- scales::rescale(df$pseudotime, to = c(0, 1))
+    }
+    
+    # --- Define pseudotime segments
+    breaks <- seq(0, 1, length.out = n_bins + 1)
+    df$segment <- cut(df$pseudotime,
+                      breaks = breaks,
+                      labels = paste("bin", 1:n_bins),
+                      include.lowest = TRUE)
+    
+    # --- Compute mean TF activity per segment
+    seg_means <- df %>%
+      group_by(segment) %>%
+      summarise(across(-pseudotime, mean, na.rm = TRUE)) %>%
+      pivot_longer(-segment, names_to = "TF", values_to = "activity")
+    
+    # --- Select top_n TFs overall
+    top_tfs <- seg_means %>%
+      group_by(TF) %>%
+      summarise(mean_activity = mean(activity, na.rm = TRUE)) %>%
+      slice_max(order_by = mean_activity, n = top_n) %>%
+      pull(TF)
+    
+    seg_means_top <- seg_means %>%
+      filter(TF %in% top_tfs) %>%
+      pivot_wider(names_from = segment, values_from = activity) %>%
+      column_to_rownames("TF")
+    
+      # --- Order genes by peak bin (staircase) ---
+    mat <- as.matrix(seg_means_top)
+    peak_bin <- apply(mat, 1, which.max)
+    row_order <- order(peak_bin)
+    mat <- mat[row_order, ]
+    
+        # --- Add suffix for condition subset
+    subset_label <- ""
+    if (!is.null(subset_condition_pattern)) {
+      safe_pattern <- subset_condition_pattern |>
+        str_replace_all("\\|", "_")              # replace | with _
+      subset_label <- glue("_subset-{safe_pattern}")
+    }
+    
+    write.xlsx(mat,file.path(out_dir,glue("TF-matrix_{plt_name}_{pt_col}_top{top_n}_n_bins{n_bins}",
+                      "{subset_label}.xlsx")), rowNames = TRUE)
+    
+    if(0){
+    # --- Generate ComplexHeatmap
+    ht <- ComplexHeatmap::Heatmap(mat,
+                  name = "TF activity (z-score)",
+                  cluster_rows = FALSE,
+                  cluster_columns = FALSE,
+                  show_row_names = TRUE,
+                  show_column_names = TRUE,
+                  column_title = glue("{pt_col} order (n_bins={n_bins}", 
+                                      "top_n={top_n})"))
+    
+    # --- Auto-calculate width/height
+    dims <- calc_ht_size(ht, unit = "in")
+    width <- dims[1]
+    height <- dims[2]
+    
+
+
+    # --- Save
+    save_ggplot_formats(
+      ht,
+      base_plot_dir = out_dir,
+      plt_name = glue("TF_heatmap_{plt_name}_{pt_col}_top{top_n}_n_bins{n_bins}",
+                      "{subset_label}"),
+      plot_obj = "heatmap",
+      formats = save_formats,
+      width = width -2,
+      height = height + 6
+    )
+    }
+  }
+}
+```
+
+```{r}
+# Only day 25 subset
+plot_top_tf_heatmaps(
+  seuratobject = sling_results$d25$seurat,
+  tf_input = tf_csv,
+  pseudotime_cols = "slingPseudotime_1_PCA",
+  out_dir = plots_folder,
+  subset_condition_pattern = "d25",
+  n_bins = 10,
+  top_n = 100,
+  plt_name = "ent_top100_d25"
+)
+
+# Only preweaning subset
+plot_top_tf_heatmaps(
+  seuratobject = sling_results$preweaning$seurat,
+  tf_input = tf_csv,
+  pseudotime_cols = c("slingPseudotime_2_PCA","slingPseudotime_3_PCA"),
+  out_dir = plots_folder,
+  subset_condition_pattern = "d01|d05|d10",
+  n_bins = 10,
+  top_n = 100,
+  plt_name = "ent_top100"
+)
+```
+
+```{r}
+moor_cols <- paste0("Cluster.",1:5)
+
+res_moor_preWe <- multi_pseudotime_analysis(sling_results$preweaning$seurat,
+                                 pseudotime_cols = 
+                                   c("slingPseudotime_2_PCA",
+                                     "slingPseudotime_3_PCA"),
+                                 module_cols = moor_cols
+)
+
+res_moor_d25 <- multi_pseudotime_analysis(sling_results$d25$seurat,
+                                 pseudotime_cols = 
+                                   "slingPseudotime_1_PCA",
+                                 module_cols = moor_cols
+)
+
+
+res_moor_preWe$heatmaps$slingPseudotime_2_PCA@column_title <- "PreWe: Lineage 2"
+res_moor_preWe$heatmaps$slingPseudotime_3_PCA@column_title <- "PreWe: Lineage 3"
+res_moor_d25$heatmaps$slingPseudotime_1_PCA@column_title   <- "d25: Lineage 1"
+
+moor_hm <- draw(
+  res_moor_preWe$heatmaps$slingPseudotime_2_PCA +
+  res_moor_preWe$heatmaps$slingPseudotime_3_PCA +
+  res_moor_d25$heatmaps$slingPseudotime_1_PCA,
+  merge_legends = TRUE
+)
+
+save_ggplot_formats(plt = moor_hm, 
+                      base_plot_dir = plots_folder, 
+                      create_plot_subdir = TRUE,
+                      plot_obj = "heatmap",
+                      plt_name = 
+                        "moor_heatmap_pseudotime_pre_post_weaning_enterocyte_zscore",
+                      width = 4, 
+                      height = 3
+                    )
+```
+
+```{r}
+pseudotime_bin_DE_multi <- function(scrna,
+                                    pseudotime_cols,
+                                    n_bins = 10,
+                                    top_n = 50,
+                                    l2fc_thresh = 1,
+                                    padj_thresh = 0.05) {
+  
+  res_list <- list()
+  
+  for (pt_name in pseudotime_cols) {
+    cat("Processing pseudotime:", pt_name, "\n")
+    
+    # Extract pseudotime
+    if (!pt_name %in% colnames(scrna@meta.data)) {
+      stop(paste0("Column ", pt_name, " not found in Seurat object metadata"))
+    }
+    pt_vec <- scrna@meta.data[[pt_name]]
+    
+    # 1) Bin pseudotime
+    scrna$pt_bin <- cut(pt_vec, breaks = n_bins, labels = FALSE)
+    Idents(scrna) <- scrna$pt_bin
+    
+    # 2) DE for all bins
+    markers_raw <- FindAllMarkers(scrna,
+                                  only.pos = TRUE,
+                                  logfc.threshold = 0,
+                                  min.pct = 0)
+    
+    # 3) DE filtering
+    markers <- markers_raw %>%
+      filter(avg_log2FC > l2fc_thresh & p_val_adj < padj_thresh)
+    
+    # 4) Split by bin & enforce numeric order
+    markers_split <- split(markers, markers$cluster)
+    bin_ids <- sort(as.numeric(names(markers_split)))
+    
+    markers_split <- markers_split[as.character(bin_ids)]
+    all_bins <- as.character(bin_ids)
+    
+    # 5) Unique genes per bin
+    unique_genes <- lapply(all_bins, function(b) {
+      genes_here  <- markers_split[[b]]$gene
+      genes_other <- unique(unlist(markers_split[all_bins != b], use.names = FALSE))
+      setdiff(genes_here, genes_other)
+    })
+    names(unique_genes) <- all_bins
+    
+    # 6) Top N unique genes per bin
+    top_unique <- lapply(all_bins, function(b) {
+      df <- markers_split[[b]] %>% filter(gene %in% unique_genes[[b]])
+      df %>% arrange(p_val_adj) %>% head(top_n)
+    })
+    names(top_unique) <- all_bins
+    
+    # 7) All top unique genes
+    all_unique_topn <- unique(unlist(lapply(top_unique, function(x) x$gene)))
+    
+    # 8) Average expression per bin
+    avg_expr <- AverageExpression(scrna,
+                                  group.by = "pt_bin",
+                                  features = all_unique_topn)$RNA
+    
+    # 9) z-score
+    heat_mat <- t(scale(t(avg_expr)))
+    heat_mat[is.na(heat_mat)] <- 0
+    
+    # 10) Gene ordering (staircase)
+    peak_bin <- apply(heat_mat, 1, which.max)
+    names(peak_bin) <- rownames(heat_mat)
+    
+    ord <- unlist(lapply(1:n_bins, function(b) {
+      genes_in_bin <- names(peak_bin)[peak_bin == b]
+      if (length(genes_in_bin) > 1) {
+        genes_in_bin <- genes_in_bin[order(heat_mat[genes_in_bin, b], decreasing = TRUE)]
+      }
+      genes_in_bin
+    }))
+    
+    mat2 <- heat_mat[ord, , drop = FALSE]
+    
+    # 11) Heatmap
+    hm <- Heatmap(
+      mat2,
+      name = "z-score",
+      cluster_rows = FALSE,
+      cluster_columns = FALSE,
+      column_labels = paste0("bin_", 1:n_bins),
+      column_title = pt_name,
+      col = colorRamp2(c(-2, 0, 2), c("navy", "white", "firebrick"))
+    )
+    
+    # 12) Results
+    res_list[[pt_name]] <- list(
+      markers_raw = markers_raw,
+      markers = markers,
+      markers_split = markers_split,
+      unique_genes = unique_genes,
+      top_n_unique = top_unique,
+      heatmap_matrix = mat2,
+      heatmap = hm
+    )
+  }
+  
+  return(res_list)
+}
+
+```
+
+```{r}
+# Pseudotime columns to analyze
+pseudotime_columns <- c("slingPseudotime_2_PCA", "slingPseudotime_3_PCA")
+
+scrna <- sling_results$preweaning$seurat
+
+# Run the analysis
+res_prwe <- pseudotime_bin_DE_multi(
+  scrna =  sling_results$preweaning$seurat,
+  pseudotime_cols = pseudotime_columns,
+  n_bins = 10,
+  top_n = 10,
+  l2fc_thresh = 1,
+  padj_thresh = 0.05
+)
+
+# Draw heatmaps
+draw(res_prwe[["slingPseudotime_2_PCA"]]$heatmap)
+draw(res_prwe[["slingPseudotime_3_PCA"]]$heatmap)
+
+pseudotime_bin_DE_multi(
+  scrna =  sling_results$d25$seurat,
+  pseudotime_cols = "slingPseudotime_1_PCA",
+  n_bins = 10,
+  top_n = 10,
+  l2fc_thresh = 1,
+  padj_thresh = 0.05
+)
+
+draw(res_powe[["slingPseudotime_1_PCA"]]$heatmap)
+
+```
+
+```{r}
+plots_folder <- file.path(harddrive,"pseudotime/pseudotime_DE")
+
+save_ggplot_formats(plt = res_powe[["slingPseudotime_1_PCA"]]$heatmap, 
+                      base_plot_dir = plots_folder, 
+                      create_plot_subdir = TRUE,
+                      plot_obj = "heatmap",
+                      plt_name = 
+                        "powe_heatmap",
+                      width = 3.5, 
+                      height = 14
+                    )
+
+save_ggplot_formats(plt = res_prwe[["slingPseudotime_2_PCA"]]$heatmap, 
+                      base_plot_dir = plots_folder, 
+                      create_plot_subdir = TRUE,
+                      plot_obj = "heatmap",
+                      plt_name = 
+                        "prwe_heatmap_lineage2",
+                      width = 3.5, 
+                      height = 14
+                    )
+
+save_ggplot_formats(plt = res_prwe[["slingPseudotime_3_PCA"]]$heatmap, 
+                      base_plot_dir = plots_folder, 
+                      create_plot_subdir = TRUE,
+                      plot_obj = "heatmap",
+                      plt_name = 
+                        "prwe_heatmap_lineage3",
+                      width = 3.5, 
+                      height = 14
+                    )
+```
+
+```{r}
+go_folder <- file.path(harddrive,"pseudotime/GO")
+
+up_compare_GO <- load_object(file.path(go_folder,"GO_up_postweaning_pt1.Rds"))
+up_compare_GO_pw2 <- load_object(file.path(go_folder,"GO_up_preweaning_pt2.Rds"))
+up_compare_GO_pw3 <- load_object(file.path(go_folder,"GO_up_preweaning_pt3.Rds"))
+
+```
+
+```{r}
+p.cutoff <- 0.05
+comparison <- "GO"
+ont <- "bp"
+count.cutoff <- 10
+topN <- 3
+clust_met <- "complete"
+
+
+enterocyte_de_markers <- getsheets(
+  filename = "H:/231248/NTFS_3.64TB/suppl_tbls_for_paper/pseudotime markers/combined_tables_pseudotime_enterocyte.xlsx",
+  startrow = 1)
+
+res_up <- split(enterocyte_de_markers$enterocyte.preweaning_pt3,
+                enterocyte_de_markers$enterocyte.preweaning_pt3$bin)
+
+res_up <- res_up[order(as.numeric(names(res_up)))]
+
+res_up <- lapply(res_up,function(x){
+  x %>% pull(symbol)
+  }
+                 )
+condition="prWe3_cap10_superslim2"
+  up_compare_GO_pw3 <- compareCluster(res_up,
+                             fun = enrichGO,
+                             OrgDb = "org.Mm.eg.db",
+                             keyType = "SYMBOL",
+                             ont = ont,
+                             pAdjustMethod = "BH",
+                             pvalueCutoff  = p.cutoff,
+                             readable = TRUE
+                             )
+  
+  write.csv(as.data.frame(up_compare_GO_pw3),
+              file = file.path(charts_folder, "compare_genes_ht_GO_pw3.csv"),
+              row.names = FALSE)
+    
+    write.xlsx(as.data.frame(up_compare_GO_pw3), file = 
+                 file.path(charts_folder, "compare_genes_ht_GO_pw3.xlsx"))
+    
+process_comparison_results(up_compare_GO_pw3,
+                           condition, 
+                           topN, 
+                           count.cutoff, 
+                           clust_met, 
+                           pos_color_low, 
+                           pos_color,
+                           plots_folder = go_folder, 
+                           charts_folder = go_folder, 
+                           truncate_go_term)
+
+save_object(up_compare_GO,file.path(plots_folder,"GO_up_postweaning_pt1.Rds"))
+save_object(up_compare_GO_pw2,file.path(plots_folder,"GO_up_preweaning_pt2.Rds"))
+save_object(up_compare_GO_pw3,file.path(plots_folder,"GO_up_preweaning_pt3.Rds"))
+```
+
+```{r}
+#gob_order <- c("5", "7", "2", "4", "3", "0", "6","1")
+
+scrna_goblet <- RunSlingshot(
+    scrna_goblet,
+    group.by   = "RNA_snn_res.0.7",
+    start.clus = "5",
+    reducedDim = "INTE_PCA"
+  )
+
+sling_gob <- scrna_goblet@misc$slingshot$INTE_PCA$SlingPseudotime
+colnames(sling_gob) <- paste0(colnames(sling_gob),"_PCA")
+scrna_goblet@meta.data[,colnames(sling_gob)] <- as.data.frame(sling_gob)
+
+dp_scrna_gob <- DimPlot2(scrna_goblet, 
+                     features = colnames(sling_gob), 
+                     cols = "C", 
+                     theme = NoAxes(),
+                     reduction = "harmony_UMAP"
+                     )
+
+save_ggplot_formats(plt = dp_scrna_gob, 
+                      base_plot_dir = plots_folder, 
+                      #create_plot_subdir = TRUE,
+                      plt_name = "slingshot_full_scrna_goblet_uninf", 
+                      width = 5, 
+                      height = 4
+                    )
+```
+
+```{r}
+plots_folder <- file.path(harddrive,"pseudotime/noc2_no11/plots",
+                          "slingshot_agewise/goblet")
+dir.create(plots_folder)
+
+# Example subsets by stage
+timepoints <- c("d01", "d05", "d10", "d25")
+groupings <- list(
+  #"d01_d05"    = c("d01", "d05"),
+  #"d05_d10"    = c("d05", "d10"),
+  "preweaning" = c("d01", "d05", "d10")
+)
+
+#we need to do this for full scrna and goblet
+
+Idents(scrna_goblet) <- "stage"
+scrna_goblet$stage <- droplevels(as.factor(scrna_goblet$stage))
+
+cluster_use <- "RNA_snn_res.0.7"
+### Run Slingshot per timepoint
+sling_gob_time_list <- lapply(timepoints, function(tp) {
+  print(glue("Processing timepoint: {tp}"))
+
+  subset_obj <- subset(scrna_goblet, idents = tp)
+  
+  tab <- table(subset_obj[[cluster_use]])
+  small_clusters <- names(tab[tab < 20])
+  
+  Idents(subset_obj) <- cluster_use
+  
+  removed_cells <- WhichCells(subset_obj, idents = small_clusters)
+
+  # subset to keep everything but the tiny clusters
+   if(!is.null(removed_cells)){
+     subset_filt <- subset(subset_obj, cells = removed_cells, invert = TRUE)
+     subset_filt[[cluster_use]] <- droplevels(subset_filt[[cluster_use]])
+   } else {subset_filt <- subset_obj}
+  
+  subset_filt <- RunSlingshot(
+    subset_filt,
+    group.by   =  cluster_use,
+    start.clus = "5",
+    reducedDim = "INTE_PCA"
+  )
+
+  sling <- subset_filt@misc$slingshot$INTE_PCA$SlingPseudotime
+  colnames(sling) <- paste0(colnames(sling), "_PCA")
+  subset_filt@meta.data[, colnames(sling)] <- as.data.frame(sling)
+
+  dp_subset_obj <- DimPlot2(
+    subset_filt,
+    features   = colnames(sling),
+    cols       = "C",
+    theme      = NoAxes(),
+    reduction  = "harmony_UMAP"
+  )
+  
+  ncols <- ncol(sling)
+
+  # Start at minimum width of 5
+  plt_width <- 5
+  
+  # If more than 4 columns, increase by 1 for every 2 columns over 4
+  if (ncols > 4) {
+    plt_width <- 5 + floor((ncols - 5) / 2) + 1
+  }
+
+  # optionally fix height for small numbers of columns
+  plt_height <- ifelse(ncols < 3, 2, 4)
+  
+  save_ggplot_formats(
+    plt           = dp_subset_obj,
+    base_plot_dir = plots_folder,
+    plt_name      = glue("slingshot_goblet_{tp}"),
+    width         = plt_width,
+    height        = plt_height
+  )
+
+  list(sling = sling, seurat = subset_filt)
+})
+names(sling_gob_time_list) <- timepoints
+
+
+### Run Slingshot per group of timepoints
+sling_goblet_group_list <- lapply(names(groupings), function(grp) {
+  print(glue("Processing group: {grp}"))
+
+  tp_list <- groupings[[grp]]
+  subset_obj <- subset(scrna_goblet, idents = tp_list)
+  
+  tab <- table(subset_obj[[cluster_use]])
+  small_clusters <- names(tab[tab < 20])
+  
+  Idents(subset_obj) <- cluster_use
+  removed_cells <- WhichCells(subset_obj, idents = small_clusters)
+
+  # subset to keep everything but the tiny clusters
+ if(!is.null(removed_cells)){
+  subset_filt <- subset(subset_obj, cells = removed_cells, invert = TRUE)
+  subset_filt[[cluster_use]] <- droplevels(subset_filt[[cluster_use]])
+ } else {subset_filt <- subset_obj}
+  
+  subset_filt <- RunSlingshot(
+    subset_filt,
+    group.by   =  cluster_use,
+    start.clus = "5",
+    reducedDim = "INTE_PCA"
+  )
+
+  sling <- subset_filt@misc$slingshot$INTE_PCA$SlingPseudotime
+  colnames(sling) <- paste0(colnames(sling), "_PCA")
+  subset_filt@meta.data[, colnames(sling)] <- as.data.frame(sling)
+
+  dp_subset_obj <- DimPlot2(
+    subset_filt,
+    features   = colnames(sling),
+    cols       = "C",
+    theme      = NoAxes(),
+    reduction  = "harmony_UMAP"
+  )
+
+  ncols <- ncol(sling)
+
+  # Start at minimum width of 5
+  plt_width <- 5
+  
+  # If more than 4 columns, increase by 1 for every 2 columns over 4
+  if (ncols > 4) {
+    plt_width <- 5 + floor((ncols - 5) / 2) + 1
+  }
+
+  # optionally fix height for small numbers of columns
+  plt_height <- ifelse(ncols < 3, 2, 4)
+  
+  save_ggplot_formats(
+    plt           = dp_subset_obj,
+    base_plot_dir = plots_folder,
+    plt_name      = glue("slingshot_goblet_{grp}"),
+    width         = plt_width,
+    height        = plt_height
+  )
+  list(sling = sling, seurat = subset_filt)
+})
+names(sling_goblet_group_list) <- names(groupings)
+
+ 
+# both results together
+ sling_goblet_results <- c(
+   sling_gob_time_list,
+   sling_goblet_group_list
+ )
+```
+
+```{r}
+# preweaning subset goblet
+plot_top_tf_heatmaps(
+  seuratobject = sling_group_list$preweaning$seurat,
+  tf_input = tf_csv,
+  pseudotime_cols = c("slingPseudotime_1_PCA","slingPseudotime_3_PCA"),
+  out_dir = plots_folder,
+  subset_condition_pattern = "d01|d05|d10",
+  n_bins = 10,
+  top_n = 20,
+  plt_name = "goblet_prewe"
+)
+
+# preweaning subset goblet
+plot_top_tf_heatmaps(
+  seuratobject = sling_group_list$preweaning$seurat,
+  tf_input = tf_csv,
+  pseudotime_cols = c("slingPseudotime_1_PCA","slingPseudotime_3_PCA"),
+  out_dir = plots_folder,
+  subset_condition_pattern = "d01|d05|d10",
+  n_bins = 4,
+  top_n = 100,
+  plt_name = "goblet_prewe_top100_4bin_tbl"
+)
+```
+
+```{r}
+pseudotime_bin_DE_multi(
+  scrna = sling_group_list$preweaning$seurat,
+  pseudotime_cols = c("slingPseudotime_1_PCA","slingPseudotime_3_PCA"),
+  top_n = 50,
+  n_bins = 4,
+  plots_folder = plots_folder
+)
+```
+
+```{r}
+p.cutoff <- 0.05
+comparison <- "GO"
+ont <- "bp"
+count.cutoff <- 5
+topN <- 5
+clust_met <- "complete"
+
+
+goblet_de_markers <- getsheets(
+  filename = file.path(harddrive,"pseudotime/noc2_no11/plots/slingshot_agewise/",
+  "goblet/markers_goblet_4_bins/combined_tables_pseudotime_goblet_preweaning_4bin.xlsx"),
+  startrow = 1)
+
+goblet_de_markers_filtered <- lapply(goblet_de_markers, function(df) {
+  df %>% 
+    dplyr::filter(!grepl("ribo|mito", description, ignore.case = TRUE))
+})
+
+walk(names(goblet_de_markers_filtered), function(nm) {
+  
+  message("Processing: ", nm)
+
+  # 1. Extract DE table for this element
+  df <- goblet_de_markers_filtered[[nm]]
+
+  # 2. Split by pseudotime bin
+  res_up <- split(df, df$bin)
+
+  # 3. Order bins numerically
+  res_up <- res_up[order(as.numeric(names(res_up)))]
+
+  # 4. Keep only gene symbols
+  res_up <- lapply(res_up,function(x){ x %>% pull(symbol) })
+
+  # 5. Run GO
+  up_compare_GO <- compareCluster(
+    res_up,
+    fun = enrichGO,
+    OrgDb = "org.Mm.eg.db",
+    keyType = "SYMBOL",
+    ont = ont,
+    pAdjustMethod = "BH",
+    pvalueCutoff = p.cutoff,
+    readable = TRUE
+  )
+
+  # 6. Save CSV + XLSX
+  write.csv(
+    as.data.frame(up_compare_GO),
+    file = file.path(charts_folder, glue("GO_{nm}_up_nomito_ribo.csv")),
+    row.names = FALSE
+  )
+
+  write.xlsx(
+    as.data.frame(up_compare_GO),
+    file = file.path(charts_folder, glue("GO_{nm}_up_nomito_ribo.xlsx"))
+  )
+
+  # 7. Process + plot
+  process_comparison_results(
+    up_compare_GO,
+    glue("{nm}_up_nomito_ribo"),
+    topN,
+    count.cutoff,
+    clust_met,
+    pos_color_low,
+    pos_color,
+    plots_folder = go_folder,
+    charts_folder = go_folder,
+    truncate_go_term
+  )
+
+  # 8. Save RDS
+  save_object(up_compare_GO, file.path(go_folder, glue("{nm}_top_{topN}_up_nomito_ribo.Rds")))
+})
+
+```
