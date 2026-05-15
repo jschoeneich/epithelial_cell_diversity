@@ -9,8 +9,8 @@ The analysis is separated into different parts:
 	* Bulk-RNA-Seq analysis using DESeq2
 		* Bulk analysis full small intestine only uninfected
 		* Bulk analysis full small intestine including infected
-		* Bulk analysis crypts vs villi
- 		* Bulk analysis of anatomical location (proximal,medial,distal)
+		* Bulk analysis of zones (crypts vs villi)
+ 		* Bulk analysis of anatomical segments (proximal,medial,distal)
 * Proteomics analysis using limma
 	* Analysis of overlap between proteins and genes
 	* Analyis of proteins not found in the bulk RNA-seq data using tabula muris mammary gland  		 	 		
@@ -20,4 +20,6 @@ The analysis is separated into different parts:
  	* Transcription factor analysis using Dorothea
   * Pseudotime analysis using slingshot
   	* Overlap of Transcription factor acitvitiy in pseudotime
-   	* Differential expression of genes along pseudotime trajectories	 	
+   	* Differential expression of genes along pseudotime trajectories
+* robustness
+	* Robustness analysis of the dataset for the review	 	 	
