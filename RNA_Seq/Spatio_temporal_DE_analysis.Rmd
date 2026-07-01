@@ -1,0 +1,579 @@
+---
+title: "Spatio-Temporal_DE_analysis"
+author: "Johannes Schöneich"
+date: "`r Sys.Date()`"
+output: html_document
+
+---
+```{r}
+# Idea: try to see how genes change over time and over spatial (pro-med-dis). 
+# Do we have genes which are general over time NNU, but maybe in proximal UUU? etc.
+
+library(clusterProfiler)
+library(circlize)
+library(DOSE)
+library(DESeq2)
+library(enrichplot)
+library(glue)
+library(ComplexHeatmap)
+library(tidyverse)
+library(ReactomePA)
+library(openxlsx)
+library(cluster)        # For silhouette calculation
+library(factoextra)     # For visualizing optimal clusters (optional)
+```
+
+```{r}
+harddrive <- "H:/231248/NTFS_3.64TB"
+#harddrive <- "/media/johannes/EXTERNAL_USB/231248/NTFS_3.64TB/"
+
+source(file.path(harddrive,"helper_functions.R"))
+
+source(file.path(harddrive,"DE_analysis/DE_helperfunctions.R"))
+
+# Define output folders
+analysis_folder <- "DE_analysis/DE_LRT_promedi_group"
+
+plots_folder <- file.path(harddrive,analysis_folder,"tempDE/plots2")
+charts_folder <- file.path(harddrive,analysis_folder,"tempDE/charts2")
+
+dir.create(plots_folder)
+dir.create(charts_folder)
+
+set.seed(1234)
+```
+
+# Temporal DE analysis
+
+```{r}
+# We need promedi timepoint and promedi group
+# promedi timepoint shows us whats general going on over time 
+# (not taking into account spatial structure) 
+# whereas with promedi_group we can also look at changed between the locations
+
+# Read in the results from DE analysis in a list, each element a new DE comparison
+results.list.group <- readRDS(file.path(harddrive,analysis_folder,
+                                        "DE_results.list_group.Rds"))
+
+dds <- readRDS(file.path(harddrive,
+ "RNA_seq/RNAseq_promedi/dds_LRT_group_RNAseq_promedi.Rds"))
+
+countmatrix <- counts(dds,normalized = FALSE)
+
+uninf.cm <- read.xlsx(file.path(harddrive,                              
+ "DE_analysis/DE_LRT_uninfected/tempDE/charts/",
+ "temporal_de_genes_LRT_values_imputed.xlsx"),
+ rowNames = TRUE)
+
+# coldata
+coldata <- as.data.frame(colData(dds))
+
+# plotname
+NAME <- "promedi_rowcluster_GO_FE"
+```
+
+```{r}
+if (!dir.exists(plots_folder)){
+  dir.create(plots_folder,recursive = TRUE)
+  dir.create(charts_folder,recursive = TRUE)
+}
+```
+
+```{r}
+promedi.list <- list(pro = c("d01.pro_d05.pro","d05.pro_d10.pro","d10.pro_d25.pro"),
+                     med = c("d01.med_d05.med","d05.med_d10.med","d10.med_d25.med"),
+                     dis = c("d01.dis_d05.dis","d05.dis_d10.dis","d10.dis_d25.dis")
+                     )
+
+#here we define DE genes for the three conditions
+promedi.countmatrices <- lapply(seq_along(promedi.list),function(i){
+  res <- results.list.group[names(results.list.group) %in% promedi.list[[i]]]
+  
+  # Define DE genes by having |logfc| > 1 and padj < 0.05
+  res <- lapply(res,function(x){
+          x <- x[abs(x$log2FoldChange) > 1 & x$padj < 0.05,]
+          return(x)}
+          )
+
+  degenesdf <- as.data.frame(do.call(rbind, res))
+  
+  #countmatrix is the full promedi-countmatrix
+  cm <- countmatrix[unique(degenesdf$symbol),]
+  cm <- cm[,grep(names(promedi.list)[i],colnames(cm))]
+  return(cm)
+  }
+)
+
+names(promedi.countmatrices) <- names(promedi.list)
+
+# We want to filter the countmatrix to only include 
+# the overlap genes between the countmatrices
+# Overlap in this case means: a gene that has a non-neutral pattern
+# in all three locations: proximal, medial and distal gut
+
+promedi.names <- lapply(promedi.countmatrices,rownames)
+overlap <- Reduce(intersect, promedi.names)
+
+rn.uninf <- rownames(uninf.cm)
+
+uninf.cm_filter <- uninf.cm[rownames(uninf.cm) %in% overlap,]
+uninf.cm_filter <- uninf.cm_filter[1:14]
+uninf.cm_filter$rn <- rownames(uninf.cm_filter)
+uninf.cm_filter <- uninf.cm_filter %>% arrange(rn) %>% dplyr::select(-rn)
+
+promedi.countmatrices_filter <- lapply(promedi.countmatrices,function(cm){
+  cm <- as.data.frame(cm)
+  cm2 <- cm[rownames(cm) %in% overlap & rownames(cm) %in% rn.uninf,]
+  cm2$rn <- rownames(cm2)
+  cm2 <- cm2 %>% arrange(rn) %>% dplyr::select(-rn)
+  return(cm2)
+  })
+
+rownames.check <- sapply(promedi.countmatrices_filter,function(cm){
+  all(rownames(cm) == rownames(uninf.cm_filter))})
+
+if(all(rownames.check == TRUE)){
+  uninf_promedi_combined <- bind_cols(uninf.cm_filter,
+                                      promedi.countmatrices_filter)
+  
+  promedi_combined <- bind_cols(promedi.countmatrices_filter)
+  
+  uninf_promedi_combined_scaled <- as.data.frame(t(apply(
+    uninf_promedi_combined, 1, scale)))
+  colnames(uninf_promedi_combined_scaled) <- colnames(uninf_promedi_combined)
+  
+  promedi_combined_scaled <- as.data.frame(t(apply(promedi_combined, 1, scale)))
+  colnames(promedi_combined_scaled) <- colnames(promedi_combined)
+  } else print("rownames not identical")
+```
+
+# Temp DE Heatmap
+```{r}
+clust_methods <- c("ward.D", "ward.D2", "single", 
+                   "complete", "average", "mcquitty")
+
+names(clust_methods) <- clust_methods
+
+#map_dbl(clust_methods,clust_coeff)
+
+clust_method <- "ward.D2"
+
+#ward.D2.clust <- hclust(dist(df %>% as.matrix()),method = "ward.D2") 
+```
+
+```{r}
+pos_color <- "#E41A1C"
+neg_color <- "#377EB8"
+pos_color_low <- "#fff5f0"
+
+timepoint <- str_remove(colnames(promedi_combined_scaled),"_+[1-9]")
+timepoint_pmd <- sub("(_.*)", "",colnames(promedi_combined_scaled))
+days <- sub(".*_(d\\d+)_.*", "\\1",colnames(promedi_combined_scaled))
+
+tp2 <- factor(timepoint, levels = unique(timepoint))
+levels(tp2) <- gsub("_"," ",unique(timepoint))
+tp_pmd <- factor(timepoint_pmd, levels = unique(timepoint_pmd))
+
+col_fun2 <- colorRamp2(c(-2, 0, 2), c(neg_color, "white", pos_color))
+```
+
+```{r}
+# Define categories, times, and replicates
+categories <- c("pro", "med", "dis")
+times <- c("d01", "d05", "d10", "d25")
+replicates <- c("1", "2", "3", "4", "5")
+
+# Initialize new_order
+new_order <- c()
+
+# Loop over each time point to build the order
+for (time in times) {
+  if (time == "d25") {
+    # For d25, use replicates 2, 4, and 5
+    selected_replicates <- c("2", "4", "5")
+  } else {
+    # For other times, use replicates 1, 2, and 3
+    selected_replicates <- c("1", "2", "3")
+  }
+  
+  # Append the combinations for each category
+  for (category in categories) {
+    new_order <- c(new_order, paste(category, time, selected_replicates, sep = "_"))
+  }
+}
+```
+
+```{r}
+# Reorder the matrix columns based on the new order
+promedi_by_time <- promedi_combined_scaled[, new_order]
+
+# Adjust colors for time points
+color_values <- c("#E08B00", "#5BB300", "#7997FF", "#FF61C9")
+names(color_values) <- c("d01", "d05", "d10", "d25")
+
+# Define time groups based on column names
+time_points <- gsub("^(pro|med|dis)_(d[0-9]+)_.+$", "\\2", colnames(promedi_by_time))
+time_factors <- factor(time_points, levels = c("d01", "d05", "d10", "d25"))
+
+promedi_colnames <- gsub('.{2}$', '', colnames(promedi_combined_scaled[, new_order]))
+promedi_factors <-  factor(promedi_colnames,levels = unique(promedi_colnames))
+
+# Simplify column names to "pro", "med", or "dis"
+colnames(promedi_by_time) <- gsub("^(pro|med|dis)_.+$", "\\1", colnames(promedi_by_time))
+
+top_annotation <- HeatmapAnnotation(
+  Time = anno_block(
+    gp = gpar(fill = color_values, col = NA),   # Use the color values for the blocks
+    labels = names(color_values),               # Add the timepoint labels
+    labels_gp = gpar(fontsize = 7, col = "black", fontface = "bold")  # Labels styled inside the bars
+  ),show_legend = TRUE,
+  height = unit(5, "mm")  # Adjust the height of the annotation bar
+)
+
+bot_annotation <-  HeatmapAnnotation(
+    location = rep(rep(c("pro","med","dis"),each = 3), 4),
+    show_annotation_name = FALSE,
+    annotation_legend_param = list(title_gp = gpar(fontsize = 7), labels_gp = gpar(fontsize = 7))
+)
+```
+
+
+```{r}
+# Step 1: Perform hierarchical clustering on the rows
+row_dist <- dist(promedi_by_time)  # Calculate distance matrix for rows
+row_hclust <- hclust(row_dist, method = "ward.D2")  # Hierarchical clustering
+
+clust_method = "ward.D2"
+
+# Step 2: Determine the optimal number of clusters
+# Use silhouette width to assess cluster quality
+sil_widths <- numeric(10)  # Vector to store average silhouette widths
+
+for (k in 2:10) {
+  clusters <- cutree(row_hclust, k = k)  # Cut tree into k clusters
+  sil <- silhouette(clusters, row_dist)  # Calculate silhouette
+  sil_widths[k] <- mean(sil[, 3])        # Average silhouette width for each k
+}
+
+# Optimal number of clusters is the one with the maximum average silhouette width
+optimal_clusters <- which.max(sil_widths)
+
+# Optional: Visualize silhouette widths to confirm the optimal number of clusters
+fviz_nbclust(promedi_by_time, FUN = hcut, method = "silhouette")
+```
+
+```{r}
+# Step 3: Generate the heatmap with optimal row clustering
+heatmap.plt <- Heatmap(
+  as.matrix(promedi_by_time),
+  cluster_rows = TRUE,
+  cluster_columns = FALSE,
+  column_split = time_factors,
+  #column_split = promedi_factors,
+  column_title = NULL,
+  show_column_names = FALSE,
+  #column_names_rot = 55,
+  #column_names_gp = gpar(fontsize = 7),
+  row_title_gp = gpar(fontsize = 7),
+  show_row_names = TRUE,
+  row_dend_side = "right",
+  use_raster = TRUE,
+  raster_quality = 10,
+  col = col_fun2,
+  heatmap_legend_param = list(
+    title = "z-score",
+    legend_direction = "vertical",
+    legend_width = unit(0.5, "cm"),
+    legend_height = unit(2,"cm"),
+    labels_gp = gpar(fontsize = 7),
+    title_gp = gpar(fontsize = 7)
+  ),
+  show_row_dend = TRUE,
+  clustering_method_rows = clust_method,
+  row_dend_width = unit(7, "mm"),
+  row_split = 5,  # Set row_split to the optimal number of clusters
+  row_title = "C%s",
+  top_annotation = top_annotation,
+  #bottom_annotation = bot_annotation
+)
+ht <- draw(heatmap.plt,heatmap_legend_side = "right")
+ht_order <- row_order(ht)
+
+HM_NAME <- "promedi"
+```
+
+```{r}
+save_ggplot_formats(
+  plot_obj = "heatmap", 
+  plt = ht,
+  base_plot_dir = plots_folder,
+  plt_name = "promedIspatio_temp_hm_5r_v3",
+  width = 10,
+  height = 200,
+  units = "cm"
+)
+```
+
+# GO and Pathway
+
+```{r}
+p.cutoff <- 0.05
+comparison <- "GO"
+ont <- "bp"
+count.cutoff <- 10
+topN <- 3
+clust_met <- "complete"
+
+genes_ht_order <- lapply(ht_order,function(i){
+  genes <- rownames(promedi_by_time)[i]
+  return(genes)
+})
+
+names(genes_ht_order) <- paste0("C",1:5)
+
+genes_ht_entrez <- lapply(genes_ht_order,function(upgene){
+  gene_e <- bitr(upgene, fromType = "SYMBOL", toType = "ENTREZID", 
+                    OrgDb = "org.Mm.eg.db")
+  return(gene_e[["ENTREZID"]])
+})
+```
+
+
+```{r}
+write.xlsx(genes_ht_order,file.path(charts_folder,"Genes_spatio_temp_heatmap.xlsx"))
+```
+
+```{r}
+#edit
+
+#we want to check DE genes in our clustering. Do they correspond to significant DE genes?
+#edit 12.8.24 this is probably not needed anymore
+
+
+
+```
+
+```{r}
+compute_and_save_enrichment <- function(comparison, genes_ht_order, 
+                                        genes_ht_entrez, ont, p.cutoff,
+                                        charts_folder) {
+  results <- list()
+  
+  if (comparison == "GO" | comparison == "all") {
+    results$GO <- compareCluster(genes_ht_order,
+                                 fun = enrichGO,
+                                 OrgDb = "org.Mm.eg.db",
+                                 keyType = "SYMBOL",
+                                 ont = ont,
+                                 pAdjustMethod = "BH",
+                                 pvalueCutoff = p.cutoff,
+                                 readable = TRUE)
+    # Save result to file
+    write.csv(as.data.frame(results$GO),
+              file = file.path(charts_folder, "compare_genes_ht_GO.csv"),
+              row.names = FALSE)
+    
+    write.xlsx(as.data.frame(results$GO), file = 
+                 file.path(charts_folder, "compare_genes_ht_GO.xlsx"))
+  }
+  
+  if (comparison == "Reactome" | comparison == "all") {
+    results$Reactome <- compareCluster(genes_ht_entrez,
+                                       fun = enrichPathway,
+                                       organism = "mouse",
+                                       pAdjustMethod = "BH",
+                                       pvalueCutoff = p.cutoff,
+                                       readable = TRUE)
+    # Save result to file
+    write.csv(as.data.frame(results$Reactome),
+              file = file.path(charts_folder, "compare_genes_ht_reactome.csv"),
+              row.names = FALSE)
+    
+        
+    write.xlsx(as.data.frame(results$Reactome), file = 
+                 file.path(charts_folder, "compare_genes_ht_reactome.xlsx"))
+  }
+  
+  if (comparison == "KEGG" | comparison == "all") {
+    results$KEGG <- compareCluster(genes_ht_entrez,
+                                   fun = enrichKEGG,
+                                   organism = "mmu",
+                                   pAdjustMethod = "BH",
+                                   pvalueCutoff = p.cutoff)
+    
+    results$KEGG <- setReadable(results$KEGG, "org.Mm.eg.db",
+                                keyType = "ENTREZID")
+    results$KEGG@compareClusterResult$Description <- gsub(
+      " - Mus musculus \\(house mouse)", "",
+      results$KEGG@compareClusterResult$Description)
+    
+    # Save result to file
+    write.csv(as.data.frame(results$KEGG),
+              file = file.path(charts_folder, "compare_genes_ht_Kegg.csv"),
+              row.names = FALSE)
+    
+    write.xlsx(as.data.frame(results$KEGG), file = 
+                 file.path(charts_folder, "compare_genes_ht_Kegg.xlsx"))
+  }
+  
+  return(results)
+}
+```
+
+```{r}
+# Define a function for analysis and plotting
+process_comparison_results <- function(compare_genes_ht, comparison_name, topN, 
+                                       count.cutoff, clust_met, 
+                                       pos_color_low, pos_color, 
+                                       plots_folder, charts_folder,
+                                       truncate_go_term) {
+  # Filter and arrange by p-value
+  compare_genes_ht_filter <- filter(compare_genes_ht, Count > count.cutoff) %>%
+    arrange(p.adjust)
+  
+  # -log of adjusted p.value
+  compare_genes_ht_filter@compareClusterResult$p.adjust <-
+    -log10(compare_genes_ht_filter@compareClusterResult$p.adjust)
+  
+  # Plotting
+  df.ht <- fortify(compare_genes_ht_filter, showCategory = topN, split = NULL)
+  df.ht <- droplevels(df.ht)
+  
+  x_labels_ht <- gsub("\n", " ", levels(df.ht$Cluster))
+  levels(df.ht$Cluster) <- x_labels_ht
+  
+  # Clustering
+  markers.ht <- df.ht$Description %>% unique()
+  p.mat.ht <- df.ht %>% 
+    filter(Description %in% markers.ht) %>% 
+    dplyr::select(Description, Cluster, p.adjust) %>%
+    pivot_wider(names_from = Cluster, values_from = p.adjust) %>%
+    data.frame()
+  row.names(p.mat.ht) <- p.mat.ht$Description
+  p.mat.ht <- p.mat.ht[, -1] # Drop gene column as now in rows
+  p.mat.ht[is.na(p.mat.ht)] <- 0
+  
+  # hclust with distance matrix
+  clust.ht <- hclust(dist(p.mat.ht %>% as.matrix()), method = clust_met)
+  
+  max_p <- max(compare_genes_ht_filter@compareClusterResult$p.adjust,
+                     compare_genes_ht_filter@compareClusterResult$p.adjust)
+
+if(max_p > 10){max_p <- 10}
+  
+  # Define the theme
+
+theme.dp <- list(
+  # 1. Geoms
+  geom_point(stroke = 0 ),
+  
+  # 2. Facets & scales
+  theme_dose(6),
+  scale_color_gradient(
+    low = pos_color_low,
+    high = pos_color
+  ),
+  
+  # 3. Labels & guides
+  ylab(NULL),
+  labs(color = "-log10 (p.adjust)"),
+  guides(
+    size = guide_legend(order = 2, stroke = 0), # Ring in Legend entfernen
+    color = guide_colorbar(
+      order = 1,
+      title.theme = element_text(
+        margin = margin(-15, 0, 0, 0, "pt")
+      )
+    )
+  ),
+  
+  # 4. Theme adjustments
+  theme(
+    axis.title = element_blank(),
+    axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5),
+    #axis.text.y = element_text(angle = 45),
+    axis.ticks = element_blank(),
+    
+    strip.background = element_blank(),
+    strip.background.x = element_blank(),
+    strip.background.y = element_blank(),
+    strip.placement = "outside",
+    strip.text = element_text(face = "bold", size = 6),
+    
+    legend.text = element_text(size = 6),
+    legend.title = element_text(size = 6),
+    legend.title.position = "top",
+    legend.position = "inside",
+    legend.position.inside = c(2.6, -0.4),
+    legend.direction = "horizontal",
+    legend.box = "vertical",
+    legend.spacing.x = unit(0.025, "cm"),
+    legend.spacing.y = unit(0.025, "cm"),
+    legend.key.spacing.x = unit(0, "cm"),
+    legend.background = element_blank(),
+    legend.box.background = element_blank(),
+    
+    panel.background = element_blank(), # transparent panel bg
+    plot.background = element_blank()   # transparent plot bg
+  )
+)
+
+  # Prepare data for plotting
+  df.ht <- df.ht %>%
+  mutate(p.adjust = ifelse(p.adjust > max_p, max_p, p.adjust))
+
+  df.ht_rc <- df.ht
+  df.ht_rc$Description <- fct_relevel(df.ht_rc$Description,
+                                      rev(clust.ht$labels[clust.ht$order]))
+  df.ht_rc$Description_trunc <- sapply(df.ht_rc$Description, truncate_go_term)
+  df.ht_rc$ID_desc <- paste(df.ht_rc$ID, df.ht_rc$Description_trunc)
+  df.ht_rc <- df.ht_rc %>% mutate(FoldEnrichment = GeneRatio /
+                                    parse_ratio(BgRatio))
+  
+  # Create plot
+  dp.ht_rc <- ggplot(df.ht_rc, aes(x = Cluster, y = Description, 
+                                    size = FoldEnrichment, color = p.adjust)) +
+    theme.dp + scale_y_discrete(position = "right") +
+      scale_size(range = c(0.5, 2)) #+ 
+    #scale_color_viridis_c(option = "viridis", direction = -1) 
+  
+  # Save plot and data
+  save_ggplot_formats(
+    plt = dp.ht_rc,
+    create_plot_subdir = TRUE,
+    base_plot_dir = plots_folder,
+    plt_name = glue("{comparison_name}_dotplot.ht_rc_FE_top_{topN}"),
+    width = 2.25, height = 1.5
+  )
+  
+  # write.csv(as.data.frame(df.ht_rc),
+  #           file = file.path(charts_folder,
+  #                         glue("compare_genes_ht_filter_{comparison_name}.csv")),
+  #           row.names = FALSE)
+  # 
+  #   write.xlsx(as.data.frame(df.ht_rc),
+  #           file = file.path(charts_folder,
+  #                         glue("compare_genes_ht_filter_s{comparison_name}.xlsx"))
+  #           )
+}
+```
+
+```{r}
+# Define a list of compare_genes_ht objects
+# Compute and save enrichment results
+compare_genes_ht_list <- compute_and_save_enrichment(comparison, genes_ht_order,
+                                                     genes_ht_entrez, ont,
+                                                     p.cutoff, charts_folder)
+```
+
+```{r}
+# Loop through the list and process each
+for (condition in names(compare_genes_ht_list)) {
+  if (comparison == condition | comparison == "all") {
+    compare_genes_ht <- compare_genes_ht_list[[condition]]
+    process_comparison_results(compare_genes_ht, condition, topN, count.cutoff, 
+                               clust_met, pos_color_low, pos_color,
+                               plots_folder, charts_folder, truncate_go_term)
+  }
+}
+```
