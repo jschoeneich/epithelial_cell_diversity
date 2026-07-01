@@ -1,0 +1,1076 @@
+---
+title: "Pathway_analysis_RNAseq"
+author: "Johannes Schöneich"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r libraries}
+library(Hmisc)
+library(DESeq2)
+library(tidyverse)
+library(digest)
+library(progeny)
+library(decoupleR)
+library(cowplot)
+library(clusterProfiler)
+library(ComplexHeatmap)
+library(ggpubr)
+library(tidyr)
+library(ggpubr)
+library(tidyr)
+library(stats)
+library(broom)
+library(multcomp)
+library(rstatix)
+library(circlize)
+library(openxlsx)
+library(glue)
+library(reshape2)
+library(progeny)
+library(decoupleR)
+library(OmnipathR)
+library(ggtext)
+
+#Specify the harddrive
+harddrive <- "H:"
+
+# we defined the functions in the R-script pathway_functions
+source(file.path(harddrive,"/Arbeit/helper_functions.R"))
+source(file.path(harddrive,"/pathway_functions.R"))
+
+set.seed(1234)
+```
+
+```{r }
+# condition which has been analysed e.g. timepoint, infection, crypt-villus
+condition <- "promedi"
+
+analysis_folder <- "DE_analysis/DE_LRT_promedi"
+
+#normalized countmatrix for progeny
+cm.norm <- read.csv(file.path(harddrive,
+                            "RNA_seq/RNAseq_promedi/countmatrix_normalized_LRT_RNAseq_promedi.csv"),
+                            row.names = 1)
+
+#cm.norm <- read.csv("H:/Proteomics/raw_data_protdf.csv",row.names = 1)
+
+plots_folder <- file.path(harddrive,analysis_folder,"Pathway/plots")
+charts_folder <- file.path(harddrive,analysis_folder,"Pathway/charts")
+
+dir.create(plots_folder,recursive = T)
+dir.create(charts_folder,recursive = T)
+```
+
+
+```{r}
+# We do not need to filter beforehand, the functions filter for |log2fc| > 1 and p.adj < 0.05
+hallmark_down <- get_hallmark_down(results.list)
+hallmark_up <- get_hallmark_up(results.list)
+
+reactome_down <- get_reactome_down(results.list)
+reactome_up <- get_reactome_up(results.list)
+
+kegg_down <- get_kegg_down(results.list)
+kegg_up <- get_kegg_up(results.list)
+
+pos_color <- "#E41A1C"
+neg_color <- "#377EB8"
+col_fun <- circlize::colorRamp2(c(0, 1, 2), c(neg_color, "white", pos_color))
+```
+
+# Hallmark Pathway
+```{r}
+### up genes top 10 hallmark ------------------
+hallmark.up.plots.list = lapply(hallmark_up, function(x){
+  df = x@result
+  if (is.list(df) && length(df)==0){
+    log.m = as.data.frame(list())
+    return(log.m)
+  }
+  log.m = as.data.frame(-log10(df$p.adjust))
+  log.m$names = as.factor(sapply(df$Description, function(y){
+    y <- as.character(trimws(y))
+    if(str_length(y) > 60){
+      hs <- digest(y, "crc32")
+      y = paste(substr(y, 1, 50), hs)}
+    return(y) }))
+  log.m <- log.m[order(log.m[,1],decreasing = TRUE),]
+  showCatehallmarkry = min(length(log.m[,1]), 10)
+  log.m <- log.m[1:showCatehallmarkry, ]
+  log.m <- log.m[order(log.m[,1],decreasing = FALSE),]
+  return(log.m)
+} )
+
+### up genes plot hallmark -----------
+plots = lapply(seq_along(hallmark.up.plots.list), function(y, i) {
+  col <- y[[i]]
+  if(length(col) == 0)
+    return(NULL)
+  ggplot(col, aes(reorder(x=col[,2], col[,1]), y=col[,1])) +
+    geom_bar(stat="identity", fill=pos_color, color="grey50") +
+    ggtitle(paste("hallmark Up ", names(y)[i])) +
+    theme(axis.text.y  = element_text(size=14)) +
+    scale_y_continuous(name="-log10(p-value)") +
+    scale_x_discrete(name= "") +
+    coord_flip()}
+  ,
+  y = hallmark.up.plots.list)
+plots <- Filter(Negate(is.null), plots)
+max <- length(plots)
+counter <- 0
+  for(i in seq(1,max,6)){
+    counter <- counter+1
+    j <- i+5
+    if(j > max){j <- max}
+    pg <- plot_grid(plotlist = plots[i:j], ncol = 2)
+
+save_ggplot_formats(
+  plt = pg,
+  create_plot_subdir = T,
+  base_plot_dir = plots_folder,
+  plt_name = glue("hallmark_up_{condition}_{counter}_out_of_{length(seq(1,max,6))}"),
+  width = 50,height = 20,units = "cm"
+)
+}
+### heatmap hallmark up --------------------
+df.list <- lapply(names(hallmark_up), function(x) hallmark_up[[x]]@result)
+names(df.list) <- names(hallmark_up)
+intersect_hallmarkID <- Reduce(intersect, lapply(df.list, function(x) x$ID))
+filtered_hallmark <- c()
+for(hallmarkid in  intersect_hallmarkID){
+  is_sigs <- sapply(df.list, function(x)x[x$ID==hallmarkid,]$p.adjust < 0.05)
+  if(any(is_sigs) & table(is_sigs)["TRUE"] == 1){
+    filtered_hallmark <- c(filtered_hallmark, hallmarkid)
+  }
+}
+
+if(!is.null(filtered_hallmark)){
+  df.list <- lapply(df.list, function(x) x %>% filter(ID %in% filtered_hallmark) )
+  df.list <- lapply(names(df.list), function(x) df.list[[x]] %>% mutate(name=x))
+  mdf <- do.call(rbind, df.list)
+  pmdf <- mdf[, c("Description", "name", "p.adjust")]
+  
+  pmtx <- reshape2::dcast(pmdf,  Description ~ name)
+  
+  rownames(pmtx) <- pmtx$Description
+  pmtx$Description <- NULL
+  help_mtx <- pmtx
+  help_mtx[help_mtx >= 0.05] = 1000
+  help_mtx[help_mtx < 0.05] = 1
+  help_mtx <- help_mtx[do.call(order, help_mtx),]
+  pmtx <- -log10(pmtx)
+  pmtx[pmtx>2] = 2
+  pmtx <- pmtx[rownames(help_mtx), ]
+  p <- Heatmap(as.matrix(pmtx),
+               name = "-log10(padjust)",
+               cluster_columns = F,
+               cluster_rows = F,
+               show_row_names=T,
+               col=col_fun,
+               row_names_max_width = max_text_width(
+                 rownames(pmtx), 
+                 gp = gpar(fontsize = 12)
+               ))
+  
+  png(file.path(plots_folder,"png",glue("heatmap_hallmark_up_{condition}.png")),
+      width=40,height=20,units="cm",res = 300)
+  draw(p, heatmap_legend_side = "left")
+  dev.off()
+  
+  pdf(file.path(plots_folder,"pdf",glue("heatmap_hallmark_up_{condition}.pdf")),
+      width=40,height=20)
+  draw(p, heatmap_legend_side = "left")
+  dev.off()
+} else{print("No intersect for hallmark up")}
+
+### down genes top 10 hallmark ------------------
+
+hallmark.down.plots.list = lapply(hallmark_down, function(x){
+  df = x@result
+  if (is.list(df) && length(df)==0){
+    log.m = as.data.frame(list())
+    return(log.m)
+  }
+  log.m = as.data.frame(-log10(df$p.adjust))
+  log.m$names =as.factor(sapply(df$Description, function(y){
+    y <- as.character(trimws(y))
+    if(str_length(y) > 60){
+      hs <- digest(y, "crc32")
+      y = paste(substr(y, 1, 50), hs)}
+    return(y) }))
+  log.m <- log.m[order(log.m[,1],decreasing = TRUE),]
+  showCatehallmarkry = min(length(log.m[,1]), 10)
+  log.m <- log.m[1:showCatehallmarkry, ]
+  log.m <- log.m[order(log.m[,1],decreasing = FALSE),]
+  return(log.m)
+} )
+
+### down genes plot hallmark -------------
+plots = lapply(seq_along(hallmark.down.plots.list), function(y, i) {
+  col <- y[[i]]
+  if(length(col) == 0)
+    return(NULL)
+  ggplot(col, aes(reorder(x=col[,2], col[,1]), y=col[,1])) +
+    geom_bar(stat="identity", fill= neg_color, color="grey50") +
+    ggtitle(paste("hallmark Down ", names(y)[i] )) +
+    theme(axis.text.y  = element_text(size=14)) +
+    scale_y_continuous(name="-log10(p-value)") +
+    scale_x_discrete(name= "") +
+    coord_flip()}
+  ,
+  y = hallmark.down.plots.list)
+
+plots <- Filter(Negate(is.null), plots)
+max <- length(plots)
+counter=0
+for(i in seq(1,max,6)){
+  counter <- counter+1
+  j=i+5
+  if(j > max){j <- max}
+  pg <- plot_grid(plotlist = plots[i:j], ncol = 2)
+
+  save_ggplot_formats(
+  plt = pg,
+  create_plot_subdir = T,
+  base_plot_dir = plots_folder,
+  plt_name = glue("hallmark_down_{condition}_{counter}_out_of_{length(seq(1,max,6))}"),
+  width = 50,height = 20,units = "cm"
+)
+}
+
+### heatmap hallmark down -------
+
+df.list <- lapply(names(hallmark_down), function(x) hallmark_down[[x]]@result)
+names(df.list) <- names(hallmark_down)
+intersect_hallmarkID <- Reduce(intersect, lapply(df.list, function(x) x$ID))
+filtered_hallmark <- c()
+for(hallmarkid in  intersect_hallmarkID){
+  is_sigs <- sapply(df.list, function(x)x[x$ID==hallmarkid,]$p.adjust < 0.05)
+  if(any(is_sigs) & table(is_sigs)["TRUE"] == 1){
+    filtered_hallmark <- c(filtered_hallmark, hallmarkid)
+  }
+}
+if(!is.null(filtered_hallmark)){
+  df.list <- lapply(df.list, function(x) x %>% filter(ID %in% filtered_hallmark) )
+  df.list <- lapply(names(df.list), function(x) df.list[[x]] %>% mutate(name=x))
+  mdf <- do.call(rbind, df.list)
+  pmdf <- mdf[, c("Description", "name", "p.adjust")]
+  
+  pmtx <- reshape2::dcast(pmdf,  Description ~ name)
+  
+  rownames(pmtx) <- pmtx$Description
+  pmtx$Description <- NULL
+  help_mtx <- pmtx
+  help_mtx[help_mtx >= 0.05] = 1000
+  help_mtx[help_mtx < 0.05] = 1
+  help_mtx <- help_mtx[do.call(order, help_mtx),]
+  pmtx <- -log10(pmtx)
+  pmtx[pmtx>2] = 2
+  pmtx <- pmtx[rownames(help_mtx), ]
+  p <- Heatmap(as.matrix(pmtx),
+               name = "-log10(padjust)",
+               cluster_columns = F,
+               cluster_rows = F,
+               show_row_names=T,
+               col=col_fun,
+               row_names_max_width = max_text_width(
+                 rownames(pmtx), 
+                 gp = gpar(fontsize = 12)
+               ))
+  
+  png(file.path(plots_folder,"png",glue("heatmap_hallmark_down_{condition}.png")),
+      width=40,height=20,units="cm",res=300)
+  draw(p, heatmap_legend_side = "left")
+  dev.off()
+  
+  pdf(file.path(plots_folder,"pdf",glue("heatmap_hallmark_down_{condition}.pdf")),
+      width=40,height=20)
+  draw(p, heatmap_legend_side = "left")
+  dev.off()
+} else{print("No intersect for hallmark down")}
+
+pathway_dump(condition,ptype = "HALLMARK",hallmark_up,hallmark_down)
+```
+
+# KEGG Pathway
+```{r}
+### up genes top 10 kegg -------------
+kegg.plot.list = lapply(kegg_up, function(x){
+  df = x@result
+  if (is.list(df) && length(df)==0){
+    log.m = as.data.frame(list())
+    return(log.m)
+  }
+  log.m = as.data.frame(-log10(df$p.adjust))
+  log.m$names =as.factor(sapply(df$Description, function(y){
+    y <- as.character(trimws(y))
+    if(str_length(y) > 60){
+      hs <- digest(y, "crc32")
+      y = paste(substr(y, 1, 50), hs)}
+    return(y) }))
+  log.m <- log.m[order(log.m[,1],decreasing = TRUE),]
+  showCatekeggry = min(length(log.m[,1]), 10)
+  log.m <- log.m[1:showCatekeggry, ]
+  log.m <- log.m[order(log.m[,1],decreasing = FALSE),]
+  return(log.m)
+} )
+
+### up genes plot kegg ------
+plots = lapply(seq_along(kegg.plot.list), function(y, i) {
+  col <- y[[i]]
+  if(length(col) == 0)
+    return(NULL)
+  ggplot(col, aes(reorder(x=col[,2], col[,1]), y=col[,1])) +
+    geom_bar(stat="identity", fill=pos_color, color="grey50") + #"#3399CC"
+    ggtitle(paste("kegg Up ", names(y)[i])) +
+    theme(axis.text.y  = element_text(size=14)) +
+    scale_y_continuous(name="-log10(p-value)") +
+    scale_x_discrete(name= "") +
+    coord_flip()}
+  ,
+  y = kegg.plot.list)
+plots <- Filter(Negate(is.null), plots)
+max <- length(plots)
+counter <- 0
+  for(i in seq(1,max,6)){
+    counter <- counter+1
+    j <- i+5
+    if(j > max){j <- max}
+    pg <- plot_grid(plotlist = plots[i:j], ncol = 2)
+
+  save_ggplot_formats(
+    plt = pg,
+    create_plot_subdir = T,
+    base_plot_dir = plots_folder,
+    plt_name = glue("kegg_up_{condition}_{counter}_out_of_{length(seq(1,max,6))}"),
+    width = 50,height = 20 ,units = "cm"
+  )
+}
+  
+  
+### heatmap kegg up ---------------
+df.list <- lapply(names(kegg_up), function(x) kegg_up[[x]]@result)
+names(df.list) <- names(kegg_up)
+intersect_keggID <- Reduce(intersect, lapply(df.list, function(x) x$ID))
+filtered_kegg <- c()
+for(keggid in  intersect_keggID){
+  is_sigs <- sapply(df.list, function(x)x[x$ID==keggid,]$p.adjust < 0.05)
+  if(any(is_sigs) & table(is_sigs)["TRUE"] == 1){
+    filtered_kegg <- c(filtered_kegg, keggid)
+  }
+}
+if(!is.null(filtered_kegg)){
+  df.list <- lapply(df.list, function(x) x %>% filter(ID %in% filtered_kegg) )
+  df.list <- lapply(names(df.list), function(x) df.list[[x]] %>% mutate(name=x))
+  mdf <- do.call(rbind, df.list)
+  pmdf <- mdf[, c("Description", "name", "p.adjust")]
+  
+  pmtx <- reshape2::dcast(pmdf,  Description ~ name)
+  
+  rownames(pmtx) <- pmtx$Description
+  pmtx$Description <- NULL
+  help_mtx <- pmtx
+  help_mtx[help_mtx >= 0.05] = 1000
+  help_mtx[help_mtx < 0.05] = 1
+  help_mtx <- help_mtx[do.call(order, help_mtx),]
+  pmtx <- -log10(pmtx)
+  pmtx[pmtx>2] = 2
+  pmtx <- pmtx[rownames(help_mtx), ]
+  p <- Heatmap(as.matrix(pmtx),
+               name = "-log10(padjust)",
+               cluster_columns = F,
+               cluster_rows = F,
+               show_row_names=T,
+               col=col_fun,
+               row_names_max_width = max_text_width(
+                 rownames(pmtx), 
+                 gp = gpar(fontsize = 12)
+               ))
+  
+  png(file.path(plots_folder,"png",glue("heatmap_kegg_up_{condition}.png")),
+      width=40,height=20,units="cm",res = 300)
+  draw(p, heatmap_legend_side = "left")
+  dev.off()
+  
+  pdf(file.path(plots_folder,"pdf",glue("heatmap_kegg_up_{condition}.pdf")),
+      width=40,height=20)
+  draw(p, heatmap_legend_side = "left")
+  dev.off()
+}else{print("No intersect for kegg up")}
+
+### down genes top 10 kegg------------
+  kegg.plot.list = lapply(kegg_down, function(x){
+    df = x@result
+    if (is.list(df) && length(df)==0){
+      log.m = as.data.frame(list())
+      return(log.m)
+    }
+    log.m = as.data.frame(-log10(df$p.adjust))
+    log.m$names =as.factor(sapply(df$Description, function(y){
+      y <- as.character(trimws(y))
+      if(str_length(y) > 60){
+        hs <- digest(y, "crc32")
+        y = paste(substr(y, 1, 50), hs)}
+      return(y) }))
+    log.m <- log.m[order(log.m[,1],decreasing = TRUE),]
+    showCatekeggry = min(length(log.m[,1]), 10)
+    log.m <- log.m[1:showCatekeggry, ]
+    log.m <- log.m[order(log.m[,1],decreasing = FALSE),]
+    return(log.m)
+  } )
+  
+  
+### down genes plot kegg --------
+ plots <- lapply(seq_along(kegg.plot.list), function(y, i) {
+    col <- y[[i]]
+    if(length(col) == 0)
+      return(NULL)
+    ggplot(col, aes(reorder(x=col[,2], col[,1]), y=col[,1])) +
+      geom_bar(stat="identity", fill= neg_color, color="grey50") +
+      ggtitle(paste("kegg Down ", names(y)[i] )) +
+      theme(axis.text.y  = element_text(size=14)) +
+      scale_y_continuous(name="-log10(p-value)") +
+      scale_x_discrete(name= "") +
+      coord_flip()}
+    ,
+    y=kegg.plot.list)
+  plots <- Filter(Negate(is.null), plots)
+  max <- length(plots)
+  counter <- 0
+  for(i in seq(1,max,6)){
+    counter <- counter+1
+    j <- i+5
+    if(j > max){j <- max}
+    pg <- plot_grid(plotlist = plots[i:j], ncol = 2)
+  
+    save_ggplot_formats(
+      plt = pg,
+      create_plot_subdir = T,
+      base_plot_dir = plots_folder,
+      plt_name = glue("kegg_down_{condition}_{counter}_out_of_{length(seq(1,max,6))}"),
+      width = 50,height = 20,units = "cm"
+    )
+}
+
+### heatmap kegg down ------------
+df.list <- lapply(names(kegg_down), function(x) kegg_down[[x]]@result)
+names(df.list) <- names(kegg_down)
+intersect_keggID <- Reduce(intersect, lapply(df.list, function(x) x$ID))
+filtered_kegg <- c()
+for(keggid in  intersect_keggID){
+  is_sigs <- sapply(df.list, function(x)x[x$ID==keggid,]$p.adjust < 0.05)
+  if(any(is_sigs) & table(is_sigs)["TRUE"] == 1){
+    filtered_kegg <- c(filtered_kegg, keggid)
+  }
+}
+
+if(!is.null(filtered_kegg)){
+  df.list <- lapply(df.list, function(x) x %>% filter(ID %in% filtered_kegg) )
+  df.list <- lapply(names(df.list), function(x) df.list[[x]] %>% mutate(name=x))
+  mdf <- do.call(rbind, df.list)
+  pmdf <- mdf[, c("Description", "name", "p.adjust")]
+  
+  pmtx <- reshape2::dcast(pmdf,  Description ~ name)
+  
+  rownames(pmtx) <- pmtx$Description
+  pmtx$Description <- NULL
+  help_mtx <- pmtx
+  help_mtx[help_mtx >= 0.05] = 1000
+  help_mtx[help_mtx < 0.05] = 1
+  help_mtx <- help_mtx[do.call(order, help_mtx),]
+  pmtx <- -log10(pmtx)
+  pmtx[pmtx>2] = 2
+  pmtx <- pmtx[rownames(help_mtx), ]
+  p <- Heatmap(as.matrix(pmtx),
+               name = "-log10(padjust)",
+               cluster_columns = F,
+               cluster_rows = F,
+               show_row_names=T,
+               col=col_fun,
+               row_names_max_width = max_text_width(
+                 rownames(pmtx), 
+                 gp = gpar(fontsize = 12)
+               ))
+  
+  png(file.path(plots_folder,"png",glue("heatmap_kegg_down_{condition}.png")),
+      width=40,height=20,units="cm",res = 300)
+  draw(p, heatmap_legend_side = "left")
+  dev.off()
+  
+  pdf(file.path(plots_folder,"pdf",glue("heatmap_kegg_down_{condition}.pdf")),
+      width=40,height=20)
+  draw(p, heatmap_legend_side = "left")
+  dev.off()
+} else{print("No intersect for kegg down")}
+
+pathway_dump(condition,ptype = "KEGG",kegg_up,kegg_down)
+```
+
+# Reactome Pathway
+```{r}
+### up genes top 10 reactome ---------
+
+  reactome.plot.list = lapply(reactome_up, function(x){
+    df = x@result
+    if (is.list(df) && length(df)==0){
+      log.m = as.data.frame(list())
+      return(log.m)
+    }
+    log.m = as.data.frame(-log10(df$p.adjust))
+    log.m$names =as.factor(sapply(df$Description, function(y){
+      y <- as.character(trimws(y))
+      if(str_length(y) > 60){
+        hs <- digest(y, "crc32")
+        y = paste(substr(y, 1, 50), hs)}
+      return(y) }))
+    log.m <- log.m[order(log.m[,1],decreasing = TRUE),]
+    showCatereactomery = min(length(log.m[,1]), 10)
+    log.m <- log.m[1:showCatereactomery, ]
+    log.m <- log.m[order(log.m[,1],decreasing = FALSE),]
+    return(log.m)
+  } )
+  
+### up genes plot reactome -----------
+ plots <- lapply(seq_along(reactome.plot.list), function(y, i) {
+    col <- y[[i]]
+    if(length(col) == 0)
+      return(NULL)
+    ggplot(col, aes(reorder(x=col[,2], col[,1]), y=col[,1])) +
+      geom_bar(stat="identity", fill=pos_color, color="grey50") +
+      ggtitle(paste("reactome Up ", names(y)[i])) +
+      theme(axis.text.y  = element_text(size=14)) +
+      scale_y_continuous(name="-log10(p-value)") +
+      scale_x_discrete(name= "") +
+      coord_flip()}
+    ,
+    y=reactome.plot.list)
+  plots <- Filter(Negate(is.null), plots)
+max <- length(plots)
+counter <- 0
+  for(i in seq(1,max,6)){
+    counter <- counter+1
+    j <- i+5
+    if(j > max){j <- max}
+    pg <- plot_grid(plotlist = plots[i:j], ncol = 2)
+  
+  save_ggplot_formats(
+    plt = pg,
+    create_plot_subdir = T,
+    base_plot_dir = plots_folder,
+    plt_name = glue("reactome_up_{condition}_{counter}_out_of_{length(seq(1,max,6))}"),
+    width = 50,height = 20 ,units = "cm"
+  )
+}
+
+  
+### heatmap reactome up ---------------
+
+  df.list <- lapply(names(reactome_up), function(x) reactome_up[[x]]@result)
+  names(df.list) <- names(reactome_up)
+  intersect_reactomeID <- Reduce(intersect, lapply(df.list, function(x) x$ID))
+  filtered_reactome <- c()
+  for(reactomeid in  intersect_reactomeID){
+    is_sigs <- sapply(df.list, function(x)x[x$ID==reactomeid,]$p.adjust < 0.05)
+    if(any(is_sigs) & table(is_sigs)["TRUE"] == 1){
+      filtered_reactome <- c(filtered_reactome, reactomeid)
+    }
+  }
+  if(!is.null(filtered_reactome)){
+    df.list <- lapply(df.list, function(x) x %>% filter(ID %in% filtered_reactome) )
+    df.list <- lapply(names(df.list), function(x) df.list[[x]] %>% mutate(name=x))
+    mdf <- do.call(rbind, df.list)
+    pmdf <- mdf[, c("Description", "name", "p.adjust")]
+    
+    pmtx <- reshape2::dcast(pmdf,  Description ~ name)
+    
+    rownames(pmtx) <- pmtx$Description
+    pmtx$Description <- NULL
+    help_mtx <- pmtx
+    help_mtx[help_mtx >= 0.05] = 1000
+    help_mtx[help_mtx < 0.05] = 1
+    help_mtx <- help_mtx[do.call(order, help_mtx),]
+    pmtx <- -log10(pmtx)
+    pmtx[pmtx>2] = 2
+    pmtx <- pmtx[rownames(help_mtx), ]
+    p <- Heatmap(as.matrix(pmtx),
+                 name = "-log10(padjust)",
+                 cluster_columns = F,
+                 cluster_rows = F,
+                 show_row_names=T,
+                 col=col_fun,
+                 row_names_max_width = max_text_width(
+                   rownames(pmtx), 
+                   gp = gpar(fontsize = 12)
+                 ))
+ 
+    png(file.path(plots_folder,"png",glue("heatmap_reactome_up_{condition}.png")),
+        width=40,height=20,units="cm",res = 300)
+    draw(p, heatmap_legend_side = "left")
+    dev.off()
+    
+    pdf(file.path(plots_folder,"pdf",glue("heatmap_reactome_up_{condition}.pdf")),
+        width=40,height=20)
+    draw(p, heatmap_legend_side = "left")
+    dev.off()
+}else{print("No intersect for reactome up")}
+
+### down genes top 10 reactome -----
+
+reactome.plot.list = lapply(reactome_down, function(x){
+      df = x@result
+      if (is.list(df) && length(df)==0){
+        log.m = as.data.frame(list())
+        return(log.m)
+      }
+      log.m = as.data.frame(-log10(df$p.adjust))
+      log.m$names =as.factor(sapply(df$Description, function(y){
+        y <- as.character(trimws(y))
+        if(str_length(y) > 60){
+          hs <- digest(y, "crc32")
+          y = paste(substr(y, 1, 50), hs)}
+        return(y) }))
+      log.m <- log.m[order(log.m[,1],decreasing = TRUE),]
+      showCatereactomery = min(length(log.m[,1]), 10)
+      log.m <- log.m[1:showCatereactomery, ]
+      log.m <- log.m[order(log.m[,1],decreasing = FALSE),]
+      return(log.m)
+    } )
+    
+    
+### down genes plot reactome ------------
+plots <- lapply(seq_along(reactome.plot.list), function(y, i) {
+      col <- y[[i]]
+      if(length(col) == 0)
+        return(NULL)
+      ggplot(col, aes(reorder(x=col[,2], col[,1]), y=col[,1])) +
+        geom_bar(stat="identity", fill= neg_color, color="grey50") +
+        ggtitle(paste("reactome Down ", names(y)[i] )) +
+        theme(axis.text.y  = element_text(size=14)) +
+        scale_y_continuous(name="-log10(p-value)") +
+        scale_x_discrete(name= "") +
+        coord_flip()}
+      ,
+      y = reactome.plot.list)
+    plots <- Filter(Negate(is.null), plots)
+
+max <- length(plots)
+counter <- 0
+  for(i in seq(1,max,6)){
+    counter <- counter+1
+    j <- i+5
+    if(j > max){j <- max}
+    pg <- plot_grid(plotlist = plots[i:j], ncol = 2)
+  
+    save_ggplot_formats(
+      plt = pg,
+      create_plot_subdir = T,
+      base_plot_dir = plots_folder,
+      plt_name = glue("reactome_down_{condition}_{counter}_out_of_{length(seq(1,max,6))}"),
+      width = 50,height = 20,units = "cm"
+    )
+}
+
+  
+### heatmap reactome down --------
+    df.list <- lapply(names(reactome_down), function(x) reactome_down[[x]]@result)
+    names(df.list) <- names(reactome_down)
+    intersect_reactomeID <- Reduce(intersect, lapply(df.list, function(x) x$ID))
+    filtered_reactome <- c()
+    for(reactomeid in  intersect_reactomeID){
+      is_sigs <- sapply(df.list, function(x)x[x$ID==reactomeid,]$p.adjust < 0.05)
+      if(any(is_sigs) & table(is_sigs)["TRUE"] == 1){
+        filtered_reactome <- c(filtered_reactome, reactomeid)
+      }
+    }
+    if(!is.null(filtered_reactome)){
+      df.list <- lapply(df.list, function(x) x %>% filter(ID %in% filtered_reactome) )
+      df.list <- lapply(names(df.list), function(x) df.list[[x]] %>% mutate(name=x))
+      mdf <- do.call(rbind, df.list)
+      pmdf <- mdf[, c("Description", "name", "p.adjust")]
+      
+      pmtx <- reshape2::dcast(pmdf,  Description ~ name)
+      
+      rownames(pmtx) <- pmtx$Description
+      pmtx$Description <- NULL
+      help_mtx <- pmtx
+      help_mtx[help_mtx >= 0.05] = 1000
+      help_mtx[help_mtx < 0.05] = 1
+      help_mtx <- help_mtx[do.call(order, help_mtx),]
+      pmtx <- -log10(pmtx)
+      pmtx[pmtx>2] = 2
+      pmtx <- pmtx[rownames(help_mtx), ]
+      p <- Heatmap(as.matrix(pmtx),
+                   name = "-log10(padjust)",
+                   cluster_columns = F,
+                   cluster_rows = F,
+                   show_row_names=T,
+                   col=col_fun,
+                   row_names_max_width = max_text_width(
+                     rownames(pmtx), 
+                     gp = gpar(fontsize = 12)
+                   ))
+      
+      png(file.path(plots_folder,"png",glue("heatmap_reactome_down_{condition}.png")),
+          width=40,height=20,units="cm",res = 300)
+      draw(p, heatmap_legend_side = "left")
+      dev.off()
+      
+      pdf(file.path(plots_folder,"pdf",glue("heatmap_reactome_down_{condition}.pdf")),
+          width=40,height=20)
+      draw(p, heatmap_legend_side = "left")
+      dev.off()
+    } else{print("No intersect for reactome down")}
+
+pathway_dump(condition,ptype = "Reactome",reactome_up,reactome_down)
+```
+
+# progeny + decoupleR
+
+```{r}
+net <- get_progeny(organism = 'mouse', top = 100)
+
+sample_acts <- run_wmean(mat = cm.norm, net = net, .source = 'source', .target = 'target',
+                         .mor = 'weight', times = 100, minsize = 5,seed = 1234)
+
+sample_acts_mat <- sample_acts %>%
+  filter(statistic == 'norm_wmean') %>%
+  pivot_wider(id_cols = 'condition', names_from = 'source',
+              values_from = 'score') %>%
+  column_to_rownames('condition') %>%
+  as.matrix()
+
+# Scale per sample
+sample_acts_mat <- scale(sample_acts_mat)
+sample_acts_mat = sample_acts_mat[,sort(colnames(sample_acts_mat))]
+
+# Choose color palette
+palette_length = 100
+my_color = colorRampPalette(c("Darkblue", "white","red"))(palette_length)
+
+my_breaks <- c(seq(-3, 0, length.out=ceiling(palette_length/2) + 1),
+               seq(0.05, 3, length.out=floor(palette_length/2)))
+
+# Plot
+progeny_heatmap <- pheatmap(t(sample_acts_mat), border_color = NA, 
+                          color = my_color, breaks = my_breaks,cluster_rows = F,
+                          cluster_cols = F)
+```
+
+
+```{r save progeny heatmap}
+png(file.path(plots_folder,"png",glue("progeny_heatmap_{condition}.png")),
+    width=40,height=20,units="cm",res = 300)
+draw(progeny_heatmap, heatmap_legend_side = "left")
+dev.off()
+
+pdf(file.path(plots_folder,"pdf",glue("progeny_heatmap_{condition}.pdf")),
+    width=40,height=20)
+draw(progeny_heatmap, heatmap_legend_side = "left")
+dev.off()
+```
+
+# plot progeny as boxplot
+```{r}
+# Reshape the data into a long format
+m_df <- melt(t(sample_acts_mat))
+
+colnames(m_df)<-c("pathway","timepoint","value")
+
+# Extract the timepoint from the variable name
+m_df$timepoint <- str_remove(m_df$timepoint,"_+[1-9]")
+
+if(0){
+m_df$timepoint[m_df$timepoint %ni% "d25"]="prWe"
+m_df$timepoint[m_df$timepoint %in% "d25"]="poWe"
+}
+
+m_df$timepoint<-as.factor(m_df$timepoint)
+
+# Perform ANOVA + Tukey test for each pathway
+pathways <- unique(m_df$pathway)
+
+for(loc in c("dis","med","pro")){
+   new_df <- m_df[grep(loc,m_df$timepoint),]
+  results <- list()
+  
+  for (p in pathways) {
+    data <- new_df %>% filter(pathway == p) %>% dplyr::select(-pathway)
+    result <- aov(value ~ timepoint, data = data)
+    results[[p]] <- result
+    # Extract ANOVA results for each pathway
+    print(paste("Pathway:", p))
+    print(summary(result))
+  }
+  
+  #post-hoc tukey test
+  tukey_results <- new_df %>%
+    group_by(pathway) %>%
+    tukey_hsd(value ~ timepoint,p.adjust.method = "BH")
+  tukey_results <- tukey_results %>% add_y_position()
+
+  # allowed consecutive comparisons
+pairs <- list(c("d01", "d05"), c("d05", "d10"), c("d10", "d25"))
+
+# all prefixes
+prefixes <- c("pro_", "med_", "dis_")
+
+# build valid group pairs
+valid_pairs <- unlist(lapply(prefixes, function(pref) {
+  sapply(pairs, function(p) paste0(pref, p), simplify = FALSE)
+}), recursive = FALSE)
+
+# convert into a dataframe for easy matching
+valid_pairs_df <- do.call(rbind, valid_pairs) %>% as.data.frame()
+names(valid_pairs_df) <- c("group1", "group2")
+
+# filter by inner join
+tukey_results_filtered <- tukey_results %>%
+  inner_join(valid_pairs_df, by = c("group1", "group2"))
+
+
+  # Create the boxplot with p-values
+  progeny_boxplot <- ggboxplot(new_df, 
+                               x = "timepoint", 
+                               y = "value",
+                               fill = "timepoint",
+                               facet.by = "pathway",
+                               palette = uninf_cols,
+                               nrow = 2,
+                               size = 0.1,
+                               outlier.size = 0.1) +
+    ggtitle(element_blank()) +
+    # ggtitle(glue("PROGENy pathway analysis {condition}"),
+    #         subtitle = "significance according to Tukey HSD test, 
+    #         corrected for multiple testing with benajmini-hochberg") +
+    #xlab("Timepoints") +
+   theme_bw() +
+  theme(legend.position = "none",axis.title = element_blank(),
+        axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1, size = 7),
+        strip.text = element_text(size = 7), axis.text.y = element_text(size = 7),
+        axis.ticks = element_blank(), 
+        strip.background = element_blank(),
+          legend.background = element_blank(),
+          panel.background = element_blank(), #transparent panel bg
+          plot.background = element_blank(), #transparent plot bg
+        aspect.ratio = 1
+        ) + 
+  stat_pvalue_manual(tukey_results_filtered, label = "p.adj.signif", tip.length = 0.01, hide.ns = TRUE) +
+  scale_y_continuous(expand = expansion(mult = c(0.05, 0.1)))
+  
+  save_ggplot_formats(
+    plt = progeny_boxplot,
+    create_plot_subdir = T,
+    base_plot_dir = plots_folder,
+    plt_name = glue("PROGENy_boxplot_{condition}_{loc}_wide"),
+    width = 6,height = 3
+  )
+}
+```
+
+# 2. Load Notch gene set
+
+```{r}
+# Get Notch-related genes from Reactome for mouse
+msigdb <- msigdbr(db_species = "MM", species = "Mus musculus", collection = "M2")
+notch_genes <- msigdb %>% filter(grepl("NOTCH", gs_name)) %>% pull(gene_symbol)
+
+#notch_db <- msigdb %>% filter(grepl("NOTCH", gs_name)) 
+notch_genes <- unique(notch_genes)
+```
+
+# 3. Compute GSVA / ssGSEA scores
+```{r}
+# GSVA (Gene Set Variation Analysis) / ssGSEA computes a pathway activity score per sample
+# based on expression of the genes in the gene set (here: Notch genes). 
+# Unlike PROGENy, ssGSEA treats all genes equally without weighted network information.
+# The ssGSEA score represents the relative activity of the Notch pathway in each sample.
+# Higher scores indicate higher coordinated expression of Notch pathway genes.
+# ssGSEA treats all genes equally, capturing general pathway enrichment, while PROGENy uses weighted networks.
+# 
+# Therefore:
+# - ssGSEA scores detect trends in pathway activity across timepoints or conditions.
+# - Differences reflect changes in overall expression of pathway genes.
+# - Comparison with PROGENy highlights pathways with regulatory impact versus purely expression-based activity.
+
+
+# Create named list of gene sets
+gene_sets <- list(Notch = notch_genes)
+
+# Build ssGSEA parameter object
+gsvapar <- ssgseaParam(as.matrix(cm.norm), gene_sets)
+
+# Compute ssGSEA scores
+gsva_scores <- gsva(gsvapar)
+
+# gsva_scores: matrix of enrichment scores (pathways x samples)
+# Optionally scale per sample for visualization
+gsva_scores_scaled <- t(scale(t(gsva_scores)))
+```
+
+```{r}
+palette_length <- 100
+my_color <- colorRampPalette(c("darkblue","white","red"))(palette_length)
+my_breaks <- c(seq(-3,0,length.out = ceiling(palette_length/2)+1),
+               seq(0.05,3,length.out = floor(palette_length/2)))
+
+pheatmap(gsva_scores_scaled, 
+         color = my_color, 
+         breaks = my_breaks,
+         border_color = NA,
+         cluster_rows = FALSE,
+         cluster_cols = FALSE,
+         main = "Notch Pathway ssGSEA Scores")
+
+```
+
+```{r}
+# Reshape to long format for ggplot
+m_df <- melt(gsva_scores_scaled)
+colnames(m_df) <- c("pathway","sample","value")
+
+# Extract timepoint from sample names
+m_df$timepoint <- gsub("_+[0-9]+","", m_df$sample)
+m_df$timepoint <- as.factor(m_df$timepoint)
+
+# ===== 7. ANOVA + post-hoc Tukey HSD =====
+
+for(loc in c("dis","med","pro")){
+
+  new_df <- m_df[grep(loc,m_df$timepoint),]
+
+# Tukey post-hoc
+tukey_results <- new_df %>%
+  group_by(pathway) %>%
+  tukey_hsd(value ~ timepoint, p.adjust.method = "BH") %>%
+  add_y_position()
+
+  # allowed consecutive comparisons
+pairs <- list(c("d01", "d05"), c("d05", "d10"), c("d10", "d25"))
+
+# all prefixes
+prefixes <- c("pro_", "med_", "dis_")
+
+# build valid group pairs
+valid_pairs <- unlist(lapply(prefixes, function(pref) {
+  sapply(pairs, function(p) paste0(pref, p), simplify = FALSE)
+}), recursive = FALSE)
+
+# convert into a dataframe for easy matching
+valid_pairs_df <- do.call(rbind, valid_pairs) %>% as.data.frame()
+names(valid_pairs_df) <- c("group1", "group2")
+
+# filter by inner join
+tukey_results_filtered <- tukey_results %>%
+  inner_join(valid_pairs_df, by = c("group1", "group2"))
+
+# Overlay Tukey significance on boxplot
+uninf_cols <- c("#E08B00","#5BB300","#7997FF","#FF61C9")
+
+pathway_boxplot <- ggboxplot(new_df, x = "timepoint", y = "value",
+          fill = "timepoint", palette = uninf_cols,
+          facet.by = "pathway", nrow = 1, size = 0.1, outlier.size = 0.1) +
+  theme_bw() +
+  theme(legend.position = "none",
+        axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1)) +
+  stat_pvalue_manual(tukey_results_filtered, 
+                     label = "p.adj.signif", 
+                     tip.length = 0.01, 
+                     hide.ns = TRUE) +
+  ylab("Notch Pathway ssGSEA Score")+
+    theme_bw() +
+  theme(legend.position = "none", axis.title = element_blank(),
+        axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1, size = 7),
+        strip.text = element_text(size = 7), axis.text.y = element_text(size = 7),
+        axis.ticks = element_blank(), 
+        strip.background = element_blank(),
+          legend.background = element_blank(),
+          panel.background = element_blank(), #transparent panel bg
+          plot.background = element_blank(), #transparent plot bg
+        aspect.ratio = 1
+        )# + geom_jitter(width = 0.1, size = 1)
+
+save_ggplot_formats(pathway_boxplot,
+                    base_plot_dir = plots_folder,
+                    plt_name = glue("boxplot_notch_gsva_{condition}_{loc}"),
+                    width = 2,
+                    height = 2)
+}
+```
+
+
+#Transcription factor analysis
+```{r decoupler transcription factor analysis}
+
+net_tf <- get_collectri(organism='mouse', split_complexes=TRUE)
+net_tf
+
+sample_acts_tf <- run_wmean(mat=cm.norm, net=net_tf, .source='source', .target='target',
+                            .mor='mor', times = 500, minsize = 5)
+
+n_tfs <- 100
+
+# Transform to wide matrix
+sample_acts_tf_mat <- sample_acts_tf %>%
+  filter(statistic == 'norm_wmean') %>%
+  pivot_wider(id_cols = 'condition', names_from = 'source',
+              values_from = 'score') %>%
+  column_to_rownames('condition') %>%
+  as.matrix()
+
+# Get top tfs with more variable means across clusters
+tfs <- sample_acts_tf %>%
+  group_by(source) %>%
+  summarise(std = sd(score)) %>%
+  arrange(-abs(std)) %>%
+  head(n_tfs) %>%
+  pull(source)
+
+sample_acts_tf_mat <- sample_acts_tf_mat[,tfs]
+
+# Scale per sample
+sample_acts_tf_mat <- scale(sample_acts_tf_mat)
+
+# Choose color palette
+palette_length = 100
+my_color = colorRampPalette(c("darkblue", "white","red"))(palette_length)
+
+my_breaks <- c(seq(-3, 0, length.out=ceiling(palette_length/2) + 1),
+               seq(0.05, 3, length.out=floor(palette_length/2)))
+
+# Plot
+tf_heatmap <- pheatmap(t(sample_acts_tf_mat), border_color = NA,
+                       cluster_rows = FALSE,cluster_cols = FALSE,color=my_color)
+```
+
+
+```{r Save data}
+png(file.path(plots_folder,"png",glue("progeny_transcription_factor_heatmap_{condition}.png")),
+    width=20,height=40,units="cm",res = 300)
+draw(tf_heatmap, heatmap_legend_side = "left")
+dev.off()
+
+pdf(file.path(plots_folder,"pdf",glue("progeny_transcription_factor_heatmap_{condition}.pdf")),
+    width=20,height=40)
+draw(tf_heatmap, heatmap_legend_side = "left")
+dev.off()
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+```
+

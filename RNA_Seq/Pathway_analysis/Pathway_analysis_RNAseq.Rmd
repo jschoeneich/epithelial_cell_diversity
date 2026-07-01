@@ -1,0 +1,430 @@
+---
+title: "Pathway_analysis_RNAseq"
+author: "Johannes Schöneich"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+# Libraries and helper functions
+```{r libraries}
+# Differential-expression object / normalised counts
+library(DESeq2)        
+
+# Data wrangling & plotting
+library(Hmisc)
+library(tidyverse)       
+library(reshape2)      
+library(glue)            
+library(cowplot)       
+library(ggpubr)          
+library(rstatix)         
+
+# Heatmaps / spreadsheet output
+library(ComplexHeatmap) 
+library(openxlsx)      
+
+# Pathway / TF activity inference
+library(progeny)
+library(decoupleR)
+library(OmnipathR)
+library(GSVA) 
+library(msigdbr)
+
+# Specify the harddrive
+harddrive <- "H:/231248/NTFS_3.64TB"
+
+# Custom functions
+source(file.path(harddrive, "helper_functions.R"))
+
+# Fixed seed so the permutation-based activity scores are reproducible
+set.seed(1234)
+```
+
+# Setup: data and output folders
+
+```{r setup-data}
+# The condition that was analysed (used in output file names), e.g. timepoint
+condition <- "timepoint"
+
+analysis_folder <- "DE_analysis/DE_LRT_uninfected"
+
+rnaseqfile <- "RNA_seq/RNAseq_uninfected_early_late/dds_LRT_RNAseq_uninfected_early_late.Rds"
+
+# DESeq2 object -> library-size-normalised count matrix (genes x samples).
+# This matrix is the only input the PROGENy and TF analyses below need.
+dds_fullsample <- readRDS(file.path(harddrive, rnaseqfile))
+cm.norm <- counts(dds_fullsample, normalized = T)
+
+plots_folder  <- file.path(harddrive, analysis_folder, "Pathway/plots")
+charts_folder <- file.path(harddrive, analysis_folder, "Pathway/charts")
+
+dir.create(plots_folder, recursive = T)
+dir.create(charts_folder, recursive = T)
+```
+
+# PROGENy pathway activity (decoupleR)
+```{r progeny-activity}
+# PROGENy model for mouse: for each of the 14 pathways, the top 100
+# transcriptionally-responsive genes (ranked by p-value), each carrying a signed
+# weight = the direction the gene moves when the pathway is active.
+net <- get_progeny(organism = 'mouse', top = 100)
+
+# Per-sample pathway activity by weighted mean (WMEAN).
+# 'norm_wmean' is the activity score normalised against
+# a permutation null (z-score; times = 100 permutations);
+# minsize = 5 drops any pathway with < 5 matched target genes.
+sample_acts <- run_wmean(mat = cm.norm, net = net, 
+                         .source = 'source', .target = 'target',
+                         .mor = 'weight', times = 100, minsize = 5)
+
+# Wide matrix: rows = samples, columns = pathways, values = norm_wmean score.
+sample_acts_mat <- sample_acts %>%
+  filter(statistic == 'norm_wmean') %>%
+  pivot_wider(id_cols = 'condition', 
+              names_from = 'source',
+              values_from = 'score') %>%
+  column_to_rownames('condition') %>%
+  as.matrix()
+
+# Absolute (unscaled) activity: active(+) vs repressed(-) per pathway/sample. 
+write.xlsx(sample_acts_mat, file = file.path(charts_folder, 
+                                             "sample_acts_unscaled.xlsx"), 
+           rowNames = TRUE)
+
+# Scale per feature: z-score each pathway (column) across samples. 
+# Shows relative dynamics across timepoints
+sample_acts_mat <- scale(sample_acts_mat)
+sample_acts_mat <- sample_acts_mat[, sort(colnames(sample_acts_mat))]
+
+write.xlsx(sample_acts_mat, file = file.path(charts_folder, 
+                                             "sample_acts_scaled.xlsx"), 
+           rowNames = TRUE)
+
+# Diverging palette centred at 0; values are clamped to +/-3 for display.
+palette_length = 100
+my_color = colorRampPalette(c("Darkblue", "white", "red"))(palette_length)
+
+my_breaks <- c(seq(-3, 0, length.out = ceiling(palette_length/2) + 1),
+               seq(0.05, 3, length.out = floor(palette_length/2)))
+
+# Heatmap: pathways as rows, samples as columns
+# Colors show the scaled (relative) activity.
+progeny_heatmap <- pheatmap(t(sample_acts_mat), 
+                            border_color = NA,
+                            color = my_color,
+                            breaks = my_breaks,
+                            cluster_rows = FALSE,
+                            cluster_cols = FALSE
+                            )
+```
+
+```{r save progeny heatmap}
+png(file.path(plots_folder, "png", glue("progeny_heatmap_{condition}.png")),
+    width = 40, height = 20, res = 300)
+draw(progeny_heatmap, heatmap_legend_side = "left")
+dev.off()
+
+pdf(file.path(plots_folder, "pdf", glue("progeny_heatmap_{condition}.pdf")),
+    width = 40, height = 20)
+draw(progeny_heatmap, heatmap_legend_side = "left")
+dev.off()
+```
+
+# PROGENy activity as boxplots over timepoints
+```{r progeny-boxplot-data}
+# Long format from the SCALED matrix: one row per pathway x sample.
+m_df <- melt(t(sample_acts_mat))
+
+colnames(m_df) <- c("pathway", "timepoint", "value")
+
+# Recover the timepoint from the sample name by dropping the replicate suffix
+m_df$timepoint <- str_remove(m_df$timepoint, "_+[1-9]")
+
+m_df$timepoint <- as.factor(m_df$timepoint)
+```
+
+```{r progeny-boxplot-filter}
+# Keep the pathways relevant to this study and fix their display order.
+m_df <- m_df %>% filter(pathway %in% c("JAK-STAT", "MAPK", "PI3K", "TGFb",
+                                       "WNT", "Hypoxia", "NFkB", "TNFa"))
+
+m_df$pathway <- droplevels(m_df$pathway)
+m_df$pathway <- factor(m_df$pathway, levels = c("JAK-STAT", "MAPK", "PI3K", "TGFb",
+                                       "WNT", "Hypoxia", "NFkB", "TNFa"))
+```
+
+```{r progeny-anova-tukey}
+# One-way ANOVA per pathway (activity ~ timepoint), printed for reference.
+pathways <- unique(m_df$pathway)
+results <- list()
+
+for (p in pathways) {
+  data <- m_df %>% filter(pathway == p) %>% dplyr::select(-pathway)
+  result <- aov(value ~ timepoint, data = data)
+  results[[p]] <- result
+  print(paste("Pathway:", p))
+  print(summary(result))
+}
+
+# Post-hoc Tukey HSD per pathway
+stat.test <- m_df %>%
+  group_by(pathway) %>%
+  tukey_hsd(value ~ timepoint, p.adjust.method = "BH")
+stat.test <- stat.test %>% add_y_position()
+
+# Show ONLY the consecutive-timepoint comparisons; mark every other comparison
+# "ns" so it is hidden in the plot (hide.ns = TRUE below).
+stat.test[!((stat.test$group1 == "d01" & stat.test$group2 == "d05") |
+            (stat.test$group1 == "d05" & stat.test$group2 == "d10") |
+            (stat.test$group1 == "d10" & stat.test$group2 == "d25")),
+          "p.adj.signif"] <- "ns"
+
+uninf_cols <- c("#E08B00", "#5BB300", "#7997FF", "#FF61C9")
+```
+
+```{r progeny-boxplot-plot}
+# Faceted boxplot with significance brackets for the consecutive comparisons.
+progeny_boxplot <- ggboxplot(m_df, 
+                             x = "timepoint", 
+                             y = "value",
+                             fill = "timepoint",
+                             facet.by = "pathway",
+                             palette = uninf_cols,
+                             nrow = 2,
+                             size = 0.1,
+                             outlier.size = 0.1) +
+  ggtitle(element_blank()) +
+  # Optional title:
+  # ggtitle(glue("PROGENy pathway analysis {condition}"),
+  #         subtitle = "Tukey HSD, consecutive timepoints only (d01/d05,
+  #         d05/d10, d10/d25)") +
+  theme_bw() +
+  theme(legend.position = "none", axis.title = element_blank(),
+        axis.text.x = element_text(angle = 90, 
+                                   vjust = 0.5, hjust = 1, size = 7),
+        strip.text = element_text(size = 7),
+        axis.text.y = element_text(size = 7),
+        axis.ticks = element_blank(), 
+        strip.background = element_blank(),
+          legend.background = element_blank(),
+          panel.background = element_blank(), # transparent panel bg
+          plot.background = element_blank(),  # transparent plot bg
+        aspect.ratio = 1
+        ) + 
+  stat_pvalue_manual(stat.test, label = "p.adj.signif", tip.length = 0.01, hide.ns = TRUE) +
+  scale_y_continuous(expand = expansion(mult = c(0.05, 0.1)))
+```
+
+```{r save-progeny-boxplot-formats}
+save_ggplot_formats(
+  plt = progeny_boxplot,
+  create_plot_subdir = T,
+  base_plot_dir = plots_folder,
+  plt_name = glue("PROGENy_boxplot_{condition}_full_v5"),
+  width = 6, height = 4
+)
+```
+
+# Load Notch gene set
+
+```{r}
+# Get Notch-related genes from Reactome for mouse
+msigdb <- msigdbr(db_species = "MM", species = "Mus musculus", collection = "M2")
+notch_genes <- msigdb %>% filter(grepl("NOTCH", gs_name)) %>% pull(gene_symbol)
+
+#notch_db <- msigdb %>% filter(grepl("NOTCH", gs_name)) 
+notch_genes <- unique(notch_genes)
+```
+
+# Compute GSVA / ssGSEA scores
+```{r}
+# GSVA (Gene Set Variation Analysis) / ssGSEA computes a pathway activity score per sample
+# based on expression of the genes in the gene set (here: Notch genes). 
+# Unlike PROGENy, ssGSEA treats all genes equally without weighted network information.
+# The ssGSEA score represents the relative activity of the Notch pathway in each sample.
+# Higher scores indicate higher coordinated expression of Notch pathway genes.
+# ssGSEA treats all genes equally, capturing general pathway enrichment, while PROGENy uses weighted networks.
+# 
+# Therefore:
+# - ssGSEA scores detect trends in pathway activity across timepoints or conditions.
+# - Differences reflect changes in overall expression of pathway genes.
+# - Comparison with PROGENy highlights pathways with regulatory impact versus purely expression-based activity.
+
+# Create named list of gene sets
+gene_sets <- list(Notch = notch_genes)
+
+# Build ssGSEA parameter object
+gsvapar <- ssgseaParam(cm.norm, gene_sets)
+
+# Compute ssGSEA scores
+gsva_scores <- gsva(gsvapar)
+
+# gsva_scores: matrix of enrichment scores (pathways x samples)
+# Optionally scale per sample for visualization
+gsva_scores_scaled <- t(scale(t(gsva_scores)))
+
+write.xlsx(gsva_scores_scaled,file.path(charts_folder,
+                                        "notch_scores_scaled_bulkrna.xlsx"),
+           rowNames = TRUE)
+```
+
+```{r}
+palette_length <- 100
+my_color <- colorRampPalette(c("darkblue","white","red"))(palette_length)
+my_breaks <- c(seq(-3,0,length.out = ceiling(palette_length/2)+1),
+               seq(0.05,3,length.out = floor(palette_length/2)))
+
+pheatmap(gsva_scores_scaled, 
+         color = my_color, 
+         breaks = my_breaks,
+         border_color = NA,
+         cluster_rows = FALSE,
+         cluster_cols = FALSE,
+         main = "Notch Pathway ssGSEA Scores")
+
+```
+
+```{r}
+# Reshape to long format for ggplot
+m_df <- melt(gsva_scores_scaled)
+colnames(m_df) <- c("pathway","sample","value")
+
+# Extract timepoint from sample names
+m_df$timepoint <- gsub("_+[0-9]+","", m_df$sample)
+m_df$timepoint <- as.factor(m_df$timepoint)
+
+# Perform ANOVA + Tukey HSD test
+stat.test <- m_df %>%
+  group_by(pathway) %>%
+  tukey_hsd(value ~ timepoint, p.adjust.method = "BH") %>%
+  add_y_position()
+
+# Define colors for timepoints
+uninf_cols <- c("#E08B00","#5BB300","#7997FF","#FF61C9")
+
+# Boxplot with significance
+ggboxplot(m_df, x = "timepoint", y = "value",
+          fill = "timepoint", palette = uninf_cols,
+          facet.by = "pathway", nrow = 1, size = 0.1, outlier.size = 0.1) +
+  theme_bw() +
+  theme(legend.position = "none",
+        axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1)) +
+  stat_pvalue_manual(stat.test, label = "p.adj.signif", tip.length = 0.01, hide.ns = TRUE) +
+  ylab("Notch Pathway ssGSEA Score")
+
+```
+
+```{r}
+# ===== 7. ANOVA + post-hoc Tukey HSD =====
+library(rstatix)
+
+# Perform ANOVA and Tukey HSD for each pathway
+stat.test <- m_df %>%
+  group_by(pathway) %>%
+  anova_test(value ~ timepoint) %>%       # One-way ANOVA per pathway
+  add_significance()                      # Adds p-value significance labels
+
+# Tukey post-hoc
+tukey_results <- m_df %>%
+  group_by(pathway) %>%
+  tukey_hsd(value ~ timepoint, p.adjust.method = "BH") %>%
+  add_y_position()
+
+# Optional: filter to relevant comparisons (e.g., consecutive timepoints)
+tukey_results_filtered <- tukey_results %>%
+  filter((group1 == "d01" & group2 == "d05") |
+         (group1 == "d05" & group2 == "d10") |
+         (group1 == "d10" & group2 == "d25"))
+
+# Overlay Tukey significance on boxplot
+library(ggpubr)
+uninf_cols <- c("#E08B00","#5BB300","#7997FF","#FF61C9")
+
+pathway_boxplot <- ggboxplot(m_df, x = "timepoint", y = "value",
+          fill = "timepoint", palette = uninf_cols,
+          facet.by = "pathway", nrow = 1, size = 0.1, outlier.size = 0.1) +
+  theme_bw() +
+  theme(legend.position = "none",
+        axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1)) +
+  stat_pvalue_manual(tukey_results_filtered, 
+                     label = "p.adj.signif", 
+                     tip.length = 0.01, 
+                     hide.ns = TRUE) +
+  ylab("Notch Pathway ssGSEA Score")+
+    theme_bw() +
+  theme(legend.position = "none", axis.title = element_blank(),
+        axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1, size = 7),
+        strip.text = element_text(size = 7), axis.text.y = element_text(size = 7),
+        axis.ticks = element_blank(), 
+        strip.background = element_blank(),
+          legend.background = element_blank(),
+          panel.background = element_blank(), #transparent panel bg
+          plot.background = element_blank(), #transparent plot bg
+        aspect.ratio = 1
+        )# + geom_jitter(width = 0.1, size = 1)
+
+save_ggplot_formats(pathway_boxplot,
+                    base_plot_dir = plots_folder,
+                    plt_name = "boxplot_notch_gsva",
+                    width = 2,
+                    height = 2)
+```
+
+
+# Transcription factor activity (decoupleR + CollecTRI)
+```{r decoupler transcription factor analysis}
+# CollecTRI mouse regulons: signed TF-target interactions, where the mor column
+# gives the direction of regulation. split_complexes = TRUE separates protein
+# complexes into their individual members.
+net_tf <- get_collectri(organism = 'mouse', split_complexes = TRUE)
+net_tf
+
+# Per-sample TF activity by weighted mean (500 permutations for the null).
+sample_acts_tf <- run_wmean(mat = cm.norm, net = net_tf, .source = 'source', .target = 'target',.mor = 'mor', times = 500, minsize = 5)
+
+n_tfs <- 100
+
+# Wide matrix: rows = samples, columns = TFs, values = norm_wmean score.
+sample_acts_tf_mat <- sample_acts_tf %>%
+  filter(statistic == 'norm_wmean') %>%
+  pivot_wider(id_cols = 'condition', names_from = 'source',
+              values_from = 'score') %>%
+  column_to_rownames('condition') %>%
+  as.matrix()
+
+# Select the most dynamic TFs: those with the highest SD of activity across samples.
+tfs <- sample_acts_tf %>%
+  group_by(source) %>%
+  summarise(std = sd(score)) %>%
+  arrange(-abs(std)) %>%
+  head(n_tfs) %>%
+  pull(source)
+
+sample_acts_tf_mat <- sample_acts_tf_mat[, tfs]
+
+# Scale per feature: z-score each TF (column) across samples (relative dynamics).
+sample_acts_tf_mat <- scale(sample_acts_tf_mat)
+
+# Choose color palette
+palette_length = 100
+my_color = colorRampPalette(c("darkblue", "white", "red"))(palette_length)
+
+my_breaks <- c(seq(-3, 0, length.out = ceiling(palette_length/2) + 1),
+               seq(0.05, 3, length.out = floor(palette_length/2)))
+
+# Heatmap: TFs as rows, samples as columns, no clustering.
+tf_heatmap <- pheatmap(t(sample_acts_tf_mat), border_color = NA,
+                       cluster_rows = FALSE, cluster_cols = FALSE, color = my_color)
+```
+
+```{r Save data}
+png(file.path(plots_folder, "png", glue("progeny_transcription_factor_heatmap_{condition}.png")),
+    width = 20, height = 40, res = 300)
+draw(tf_heatmap, heatmap_legend_side = "left")
+dev.off()
+
+pdf(file.path(plots_folder, "pdf", glue("progeny_transcription_factor_heatmap_{condition}.pdf")),
+    width = 20, height = 40)
+draw(tf_heatmap, heatmap_legend_side = "left")
+dev.off()
+```
