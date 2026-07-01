@@ -1,0 +1,640 @@
+---
+title: "scRNA_script"
+
+---
+
+```{r}
+library(Seurat)
+library(SeuratObject)
+library(dplyr)
+library(patchwork)
+library(openxlsx)
+library(ggplot2)
+library(tidyr)
+library(tibble)
+library(cowplot)
+theme_set(theme_cowplot())
+library(EnhancedVolcano)
+library(ggrepel)
+library(clusterProfiler)
+library(org.Mm.eg.db)
+```
+
+```{r}
+### helper: clean metadata to avoid VlnPlot crashes ###
+clean_metadata <- function(obj, features) {
+  for (f in features) {
+    if (f %in% colnames(obj@meta.data)) {
+      obj@meta.data[[f]] <- as.numeric(obj@meta.data[[f]])
+      obj@meta.data[[f]][is.na(obj@meta.data[[f]])] <- 0
+      obj@meta.data[[f]][!is.finite(obj@meta.data[[f]])] <- 0
+    }
+  }
+  return(obj)
+}
+### function to process one sample ###
+### function to process one sample ###
+process_sample <- function(sample_dir) {
+  
+  tryCatch({
+    
+    sample_name <- basename(sample_dir)
+    message("Processing: ", sample_name)
+    
+    # read data (handle multi-modal safely)
+    counts <- Read10X(data.dir = sample_dir)
+    if (is.list(counts)) {
+      counts <- counts[["Gene Expression"]]
+    }
+    
+    # create object
+    obj <- CreateSeuratObject(counts = counts, project = sample_name)
+    obj$sample <- sample_name
+    
+    # remove zero-count cells early (prevents Inf/NA later)
+    obj <- subset(obj, subset = nCount_RNA > 0 & nFeature_RNA > 0)
+    
+    # detect mitochondrial gene pattern automatically
+    mt_pattern <- "^mt-"
+    if (sum(grepl(mt_pattern, rownames(obj))) == 0) {
+      mt_pattern <- "^MT-"
+    }
+    
+    obj$percent.mt <- PercentageFeatureSet(obj, pattern = mt_pattern)
+    obj$percent.mt[is.na(obj$percent.mt)] <- 0
+    
+    obj$filter_status <- "Unfiltered"
+    
+    # clean before plotting
+    obj <- clean_metadata(obj, c("nFeature_RNA", "nCount_RNA", "percent.mt"))
+    
+    # unfiltered plot
+    vln_unfiltered <- VlnPlot(
+      obj,
+      features = c("nFeature_RNA", "nCount_RNA", "percent.mt"),
+      cols = "blue",
+      ncol = 3
+    )
+    
+    # filtering
+    obj_filt <- subset(obj, subset = percent.mt < 60)
+    obj_filt$filter_status <- "Filtered"
+    
+    # safe quantiles
+    q_nFeature <- quantile(obj_filt$nFeature_RNA, probs = c(0.05, 0.99), na.rm = TRUE)
+    q_nCount   <- quantile(obj_filt$nCount_RNA, probs = c(0.05, 0.99), na.rm = TRUE)
+    
+    obj_filt <- subset(
+      obj_filt,
+      subset = nFeature_RNA > q_nFeature[1] &
+               nFeature_RNA < q_nFeature[2] &
+               nCount_RNA > q_nCount[1] &
+               nCount_RNA < q_nCount[2]
+    )
+    
+    # complexity ratio (safe)
+    obj_filt$complexity_ratio <- obj_filt$nFeature_RNA / obj_filt$nCount_RNA
+    
+    # remove NA/Inf BEFORE filtering
+    obj_filt <- subset(
+      obj_filt,
+      subset = !is.na(complexity_ratio) & is.finite(complexity_ratio)
+    )
+    
+    obj_filt <- subset(obj_filt, subset = complexity_ratio < 0.5)
+    
+    # clean again before plotting
+    obj_filt <- clean_metadata(obj_filt, c("nFeature_RNA", "nCount_RNA", "percent.mt"))
+    
+    # merge for comparison
+    combined <- merge(obj, y = obj_filt)
+    combined$filter_status <- factor(
+      combined$filter_status,
+      levels = c("Unfiltered", "Filtered")
+    )
+    
+    combined <- clean_metadata(combined, c("nFeature_RNA", "nCount_RNA", "percent.mt"))
+    
+    vln_combined <- VlnPlot(
+      combined,
+      features = c("nFeature_RNA", "nCount_RNA", "percent.mt"),
+      group.by = "filter_status",
+      pt.size = 0,
+      cols = c("blue", "red"),
+      ncol = 3
+    )
+    
+    # save plots
+    if (!dir.exists("QC")) dir.create("QC")
+    
+    pdf(paste0("QC/Violin_", sample_name, ".pdf"), width = 10, height = 12.5)
+    print(vln_combined)
+    dev.off()
+    
+    png(paste0("QC/Violin_", sample_name, ".png"), width = 2000, height = 1500, res = 300)
+    print(vln_combined)
+    dev.off()
+    
+    return(list(
+       before = obj,
+       after = obj_filt
+    ))
+    
+  }, error = function(e) {
+    message("❌ Error in sample: ", sample_dir)
+    message("   ", e$message)
+    return(NULL)
+  })
+}
+setwd("/media/horneflablinux/Storage1/scRNA_Johannes")
+### 🔁 find all sample directories automatically ###
+sample_dirs <- list.dirs(path = ".", recursive = FALSE, full.names = TRUE)
+
+# optionally filter only those starting with "d"
+sample_dirs <- sample_dirs[grepl("^./d", sample_dirs)]
+
+### 🔁 run pipeline on all ###
+seurat_list <- lapply(sample_dirs, process_sample)
+
+names(seurat_list) <- basename(sample_dirs)
+```
+
+
+```{r}
+### use samples from QC ###
+samples <- names(seurat_list)
+
+before_counts_list <- list()
+after_counts_list <- list()
+cells_lost_list <- list()
+
+for (sample in samples) {
+  
+  before_obj <- seurat_list[[sample]]$before
+  after_obj  <- seurat_list[[sample]]$after
+  
+  before_counts <- table(before_obj$sample)
+  after_counts  <- table(after_obj$sample)
+  
+  cells_lost <- before_counts - after_counts
+  
+  before_counts_list[[sample]] <- as.numeric(before_counts)
+  after_counts_list[[sample]]  <- as.numeric(after_counts)
+  cells_lost_list[[sample]]    <- as.numeric(cells_lost)
+}
+
+cell_summary <- data.frame(
+  Sample = names(before_counts_list),
+  Before_Filtering = unlist(before_counts_list),
+  After_Filtering = unlist(after_counts_list),
+  Cells_Lost = unlist(cells_lost_list)
+)
+
+output_dir <- "QC"
+if (!dir.exists(output_dir)) dir.create(output_dir)
+
+write.xlsx(cell_summary,
+           file = file.path(output_dir, "cell_filtering_summary.xlsx"),
+           rowNames = FALSE)
+
+
+## Combine the datasets ##
+filtered_list <- lapply(seurat_list, function(x) x$after)
+
+combined_filtered <- merge(
+  x = filtered_list[[1]],
+  y = filtered_list[-1],
+  add.cell.ids = names(filtered_list),
+  project = "CombinedallSamples"
+)
+
+
+## Normalize the data ##
+combined_filtered <- NormalizeData(combined_filtered,
+                                   normalization.method = "LogNormalize",
+                                   scale.factor = 10000)
+
+## Identify top highly variable features ##
+combined_filtered <- FindVariableFeatures(
+  combined_filtered,
+  selection.method = "vst",
+  nfeatures = 2000
+)
+
+# Plot top variable features ##
+top30 <- head(VariableFeatures(combined_filtered), 30)
+plot1 <- VariableFeaturePlot(combined_filtered)
+plot_top30 <- LabelPoints(plot = plot1, points = top30, repel = TRUE)
+print(plot_top30)
+
+if (!dir.exists("top_variable_features")) dir.create("top_variable_features")
+
+pdf("top_variable_features/top30.pdf", width = 5, height= 10)
+print(plot_top30)
+dev.off()
+
+png("top_variable_features/top30.png", width = 2000, height = 4000, res=300)
+print(plot_top30)
+dev.off()
+```
+
+```{r}
+combined_filtered <- ScaleData(
+  combined_filtered,
+  features = VariableFeatures(combined_filtered),
+  verbose = FALSE
+)
+
+# 🔥 PCA (reduced overhead, same result quality)
+combined_filtered <- RunPCA(
+  combined_filtered,
+  features = VariableFeatures(combined_filtered),
+  npcs = 30,
+  verbose = FALSE
+)
+
+# Optional lightweight inspection (safe + fast)
+print(combined_filtered[["pca"]], dims = 1:20, nfeatures = 3)
+
+# Skip expensive recomputation plots (COMMENTED FOR SPEED)
+# VizDimLoadings(...)
+# DimPlot(...)
+# DimHeatmap(...)
+
+# 🔥 Elbow plot (reduced dims = faster)
+ep <- ElbowPlot(combined_filtered, ndims = 30)
+
+if (!dir.exists("QC")) dir.create("QC")
+
+pdf("QC/elbow_plot.pdf", width = 5, height = 10)
+print(ep)
+dev.off()
+
+png("QC/elbow_plot.png", width = 2000, height = 4000, res = 300)
+print(ep)
+dev.off()
+
+# 🔥 SPEED FIX 2: neighbors once (slightly larger dims for stability)
+combined_filtered <- FindNeighbors(
+  combined_filtered,
+  dims = 1:20,
+  verbose = FALSE
+)
+
+### ================================
+### 🚀 UMAP (RUN ONCE ONLY — HUGE SPEEDUP)
+### ================================
+
+combined_filtered <- RunUMAP(
+  combined_filtered,
+  dims = 1:20,
+  reduction = "pca",
+  reduction.name = "umap.unintegrated",
+  verbose = FALSE
+)
+
+### ================================
+### 🚀 CLUSTERING ONLY LOOP (FAST)
+### ================================
+
+resolutions <- seq(0.1, 1, by = 0.1)
+
+sample_levels <- unique(combined_filtered$sample)
+sample_colors <- setNames(rainbow(length(sample_levels)), sample_levels)
+
+custom_colors <- c(sample_colors,
+                   "0"="lightblue1","1"="green2","2"="purple4","3"="orange1",
+                   "4"="yellow2","5"="brown4","6"="pink1","7"="grey",
+                   "8"="turquoise3","9"="darkgreen","10"="darkblue",
+                   "11"="salmon1","12"="black","13"="limegreen",
+                   "14"="violet","15"="cyan1","16"="lightyellow2",
+                   "17"="lightgreen","18"="darkorange3","19"="maroon1",
+                   "20"="magenta4")
+
+if (!dir.exists("UMAP/unintegrated")) {
+  dir.create("UMAP/unintegrated", recursive = TRUE)
+}
+
+for (res in resolutions) {
+  
+  # only clustering changes (fast operation)
+  combined_filtered <- FindClusters(
+    combined_filtered,
+    resolution = res,
+    cluster.name = "unintegrated_clusters",
+    verbose = FALSE
+  )
+  
+  clusters <- levels(Idents(combined_filtered))
+  cluster_colors <- custom_colors[clusters]
+  
+  umap_sample_plot <- DimPlot(
+    combined_filtered,
+    reduction = "umap.unintegrated",
+    group.by = "sample",
+    cols = sample_colors
+  ) + ggtitle(paste("UMAP by Sample - Resolution", res))
+  
+  umap_cluster_plot <- DimPlot(
+    combined_filtered,
+    reduction = "umap.unintegrated",
+    group.by = "unintegrated_clusters",
+    cols = cluster_colors
+  ) + ggtitle(paste("UMAP by Cluster - Resolution", res))
+  
+  combined_plot <- umap_sample_plot + umap_cluster_plot +
+    patchwork::plot_layout(ncol = 2)
+  
+  pdf(paste0("UMAP/unintegrated/UMAP_unintegrated_res_", res, ".pdf"),
+      width = 14, height = 6)
+  print(combined_plot)
+  dev.off()
+}
+
+```
+
+```{r}
+## -------------------------------
+## Integration
+## -------------------------------
+combined_filtered$dataset_origin <- ifelse(
+  grepl("m$", combined_filtered$sample),
+  "Matsuki",
+  "own"
+)
+
+combined_filtered$dataset_origin <- factor(
+  combined_filtered$dataset_origin,
+  levels = c("own", "Matsuki")
+)
+
+combined_filtered <- IntegrateLayers(
+  combined_filtered,
+  method = CCAIntegration,
+  orig.reduction = "pca",
+  new.reduction = "integrated.cca"
+)
+
+combined_filtered <- JoinLayers(combined_filtered)
+
+combined_filtered <- FindNeighbors(
+  combined_filtered,
+  reduction = "integrated.cca",
+  dims = 1:10,
+  verbose = FALSE
+)
+
+## -------------------------------
+## 🚀 RUN UMAP ONCE (CRITICAL FIX)
+## -------------------------------
+combined_filtered <- RunUMAP(
+  combined_filtered,
+  dims = 1:10,
+  reduction = "integrated.cca",
+  reduction.name = "umap.integrated",
+  verbose = FALSE
+)
+
+## -------------------------------
+## Setup output
+## -------------------------------
+if (!dir.exists("UMAP/integrated")) {
+  dir.create("UMAP/integrated", recursive = TRUE)
+}
+
+resolutions <- seq(0.1, 1, by = 0.1)
+
+sample_levels <- unique(combined_filtered$sample)
+sample_colors <- setNames(rainbow(length(sample_levels)), sample_levels)
+
+custom_colors <- c(sample_colors,
+                   "0"="lightblue1","1"="green2","2"="purple4","3"="orange1",
+                   "4"="yellow2","5"="brown4","6"="pink1","7"="grey",
+                   "8"="turquoise3","9"="darkgreen","10"="darkblue",
+                   "11"="salmon1","12"="black","13"="limegreen",
+                   "14"="violet","15"="cyan1","16"="lightyellow2",
+                   "17"="lightgreen","18"="darkorange3","19"="maroon1",
+                   "20"="magenta4")
+
+## -------------------------------
+## 🚀 CLUSTER LOOP (FAST + CLEAN)
+## -------------------------------
+for (res in resolutions) {
+  
+  cluster_col <- paste0("integrated_clusters_", res)
+  
+  combined_filtered <- FindClusters(
+    combined_filtered,
+    resolution = res,
+    cluster.name = cluster_col,
+    verbose = FALSE
+  )
+  
+  Idents(combined_filtered) <- cluster_col
+  
+  clusters <- levels(Idents(combined_filtered))
+  cluster_colors <- custom_colors[clusters]
+  
+  ## UMAP plots (same embedding, different labels)
+  umap_sample_plot <- DimPlot(
+    combined_filtered,
+    reduction = "umap.integrated",
+    group.by = "sample",
+    cols = sample_colors
+  ) + ggtitle(paste("UMAP by Sample - Resolution", res))
+  
+  umap_cluster_plot <- DimPlot(
+    combined_filtered,
+    reduction = "umap.integrated",
+    group.by = cluster_col,
+    cols = cluster_colors
+  ) + ggtitle(paste("UMAP by Cluster - Resolution", res))
+  
+  combined_plot <- umap_sample_plot + umap_cluster_plot +
+    patchwork::plot_layout(ncol = 2)
+  
+  pdf(paste0("UMAP/integrated/UMAP_integrated_res_", res, ".pdf"),
+      width = 14, height = 6)
+  print(combined_plot)
+  dev.off()
+  
+  ## save object WITH that resolution labeling
+  saveRDS(
+    combined_filtered,
+    file = paste0("UMAP/integrated/combined_integrated_res_", res, ".rds")
+  )
+}
+
+## -------------------------------
+## Cluster tables
+## -------------------------------
+wb <- createWorkbook()
+
+for (res in resolutions) {
+  
+  cluster_col <- paste0("integrated_clusters_", res)
+  
+  obj <- readRDS(
+    paste0("UMAP/integrated/combined_integrated_res_", res, ".rds")
+  )
+  
+  Idents(obj) <- cluster_col
+  
+  df <- as.data.frame(table(Idents(obj), obj$sample))
+  colnames(df) <- c("Cluster", "Sample", "Cell_Count")
+  
+  wide_df <- df %>%
+    pivot_wider(names_from = Sample, values_from = Cell_Count, values_fill = 0)
+  
+  addWorksheet(wb, paste0("Resolution_", res))
+  writeData(wb, paste0("Resolution_", res), wide_df)
+}
+
+saveWorkbook(
+  wb,
+  "UMAP/integrated/cluster_sample_counts_by_resolution.xlsx",
+  overwrite = TRUE
+)
+```
+
+
+```{r}
+## ---------- SAFE DIRECTORY SETUP ----------
+if (!dir.exists("QC")) dir.create("QC")
+if (!dir.exists("Markers/UMAPs")) dir.create("Markers/UMAPs", recursive = TRUE)
+if (!dir.exists("Markers/dotplots")) dir.create("Markers/dotplots", recursive = TRUE)
+
+
+## ---------- SAFE FEATURE HELPER ----------
+safe_features <- function(obj, features) {
+  features[features %in% colnames(obj[[]])]
+}
+
+
+## ---------- QC FEATURE PLOT ----------
+qc_features <- safe_features(
+  combined_filtered,
+  c("percent.mt", "nCount_RNA", "nFeature_RNA")
+)
+
+if (length(qc_features) > 0) {
+
+  plot_qc <- FeaturePlot(
+    combined_filtered,
+    features = qc_features,
+    reduction = "umap.integrated",
+    cols = c("lightgrey", "red"),
+    ncol = length(qc_features)
+  )
+
+  pdf("QC/UMAP_filtered_after_integration.pdf", width = 10.5, height = 9)
+  print(plot_qc)
+  dev.off()
+
+  png("QC/UMAP_filtered_after_integration.png", width = 2000, height = 1800, res = 300)
+  print(plot_qc)
+  dev.off()
+
+} else {
+  message("⚠️ QC features not found: skipping QC FeaturePlot")
+}
+
+
+## ---------- GENE FEATURE PLOTS ----------
+for (gene in c("Nt5e", "Lypd8")) {
+  
+  if (gene %in% rownames(combined_filtered)) {
+    
+    plot <- FeaturePlot(
+      combined_filtered,
+      features = gene,
+      reduction = "umap.integrated",
+      split.by = "sample",
+      max.cutoff = "q90",
+      cols = c("lightgrey", "red"),
+      ncol = 3
+    )
+    
+    pdf(paste0("Markers/UMAPs/UMAP_filtered_after_integration_", gene, ".pdf"),
+        width = 30, height = 8)
+    print(plot)
+    dev.off()
+    
+    png(paste0("Markers/UMAPs/UMAP_filtered_after_integration_", gene, ".png"),
+        width = 3600, height = 1000, res = 300)
+    print(plot)
+    dev.off()
+  }
+}
+
+
+## ---------- DOT PLOTS ----------
+markers.to.plot <- c(
+  "Lct","Maf","Aoc1","Neu1","Alpi","Anpep","Apoa4","Chga","Chgb",
+  "Neurod1","Cpe","Muc2","Defa24","Agr2","Ccl6","Mki67","Krt8",
+  "Msi1","Olfm4","Lgr5","Ascl2","Tert","Hopx","Gkn3","Dclk1",
+  "Pou2f3","Trpm5","Avil"
+)
+
+for (res in resolutions) {
+  
+  obj <- readRDS(file.path(
+    "UMAP/integrated",
+    paste0("combined_UMAPS_integrated_res_", res, ".rds")
+  ))
+  
+  genes.use <- intersect(markers.to.plot, rownames(obj))
+  
+  if (length(genes.use) == 0) {
+    message("⚠️ No marker genes found for resolution ", res)
+    next
+  }
+  
+  sample_levels <- unique(obj$sample)
+  
+  if (length(sample_levels) < 2) {
+    
+    dotplot <- DotPlot(
+      obj,
+      features = genes.use,
+      dot.scale = 6
+    ) + RotatedAxis()
+    
+  } else {
+    
+    sample_colors <- setNames(
+      rainbow(length(sample_levels)),
+      sample_levels
+    )
+    
+    dotplot <- DotPlot(
+      obj,
+      features = genes.use,
+      split.by = "sample",
+      cols = sample_colors,
+      dot.scale = 6
+    ) +
+      RotatedAxis() +
+      theme(legend.position = "right")
+  }
+  
+  pdf(paste0("Markers/dotplots/Dotplot_marker_genes_res_", res, ".pdf"),
+      width = 13, height = 20)
+  print(dotplot)
+  dev.off()
+  
+  png(paste0("Markers/dotplots/Dotplot_marker_genes_res_", res, ".png"),
+      width = 2000, height = 3600, res = 300)
+  print(dotplot)
+  dev.off()
+}
+```
+
+```{r}
+library(SingleCellExperiment)
+library(zellkonverter)
+
+sce <- as.SingleCellExperiment(combined_filtered)
+reducedDim(sce, "X_umap") <- Embeddings(combined_filtered, "umap.integrated")
+writeH5AD(sce, "combined_integrated.h5ad")
+```
