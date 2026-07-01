@@ -23,7 +23,7 @@ library(cowplot)
 ```
 
 ```{r}
-harddrive <- "H:/231248/NTFS_3.64TB" 
+harddrive <- "E:/231248/NTFS_3.64TB" 
 
 source(file.path(harddrive,"helper_functions.R"))
 source(file.path(harddrive,"aggregate_expression_functions.R"))
@@ -84,8 +84,6 @@ Idents()
 scrna_gob_uninf_no_c6 <- RenameIdents(scrna_gob_uninf_no_c6,
              "7" = "6") 
 ```
-
-
 
 ```{r}
 results.list.promedi <- readRDS(file.path(harddrive,

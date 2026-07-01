@@ -28,7 +28,7 @@ library(scCustomize)
 # first of all we are going to overlap bulk days. We compare always vs the extremes.
 # d1/5/10 vs 25 and 25 vs 1.
 
-harddrive <- "D:/231248/NTFS_3.64TB" 
+harddrive <- "H:/231248/NTFS_3.64TB" 
 
 source(file.path(harddrive,"helper_functions.R"))
 source(file.path(harddrive,"aggregate_expression_functions.R"))
@@ -291,9 +291,33 @@ return(df)
 })
 ```
 
+```{r}
+table.map <- c(
+  preWe.crypts = "pre.weaning.crypts_pre.weaning.villi",
+  preWe.villi  = "pre.weaning.crypts_pre.weaning.villi",
+  poWe.crypts  = "post.weaning.crypts_post.weaning.villi",
+  poWe.villi   = "post.weaning.crypts_post.weaning.villi"
+)
+
+new.list.stats <- lapply(names(new.list), function(x) {
+
+  res <- results.list.cv.prepo.filter[[table.map[x]]]
+
+  merge(
+    new.list[[x]],
+    res[, c("symbol", "log2FoldChange", "padj")],
+    by.x = "Symbol",
+    by.y = "symbol",
+    all.x = TRUE,
+    sort = FALSE
+  )
+})
+
+names(new.list.stats) <- names(new.list)
+```
 
 ```{r}
-write.xlsx(new.list,file =
+write.xlsx(new.list.stats,file =
              file.path(harddrive,paste0(analysis_name,"_genes.xlsx")),
           rownames = FALSE)
 ```
